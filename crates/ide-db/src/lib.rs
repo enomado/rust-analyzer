@@ -216,40 +216,67 @@ impl RootDatabase {
         hir::db::set_expand_proc_attr_macros(self, true);
     }
 
-    pub fn update_base_query_lru_capacities(&mut self, _lru_capacity: Option<u16>) {
-        // let lru_capacity = lru_capacity.unwrap_or(base_db::DEFAULT_PARSE_LRU_CAP);
-        // base_db::FileTextQuery.in_db_mut(self).set_lru_capacity(DEFAULT_FILE_TEXT_LRU_CAP);
-        // base_db::ParseQuery.in_db_mut(self).set_lru_capacity(lru_capacity);
-        // // macro expansions are usually rather small, so we can afford to keep more of them alive
-        // hir::db::ParseMacroExpansionQuery.in_db_mut(self).set_lru_capacity(4 * lru_capacity);
-        // hir::db::BorrowckQuery.in_db_mut(self).set_lru_capacity(base_db::DEFAULT_BORROWCK_LRU_CAP);
-        // hir::db::BodyWithSourceMapQuery.in_db_mut(self).set_lru_capacity(2048);
+    /// Apply a capacity to one tracked query, addressed by its salsa
+    /// `debug_name` — `<SelfTy>::<fn>` for an associated query, the bare
+    /// function name for a free one.
+    ///
+    /// Addressing by name is not a stylistic choice. The `set_lru_capacity`
+    /// generated beside a tracked function is private to its declaring module,
+    /// and for an associated function the macro emits it *inside the body* of
+    /// the outer function, where nothing can reach it. Every query worth
+    /// retuning here is associated, so the ingredient registry is the only door;
+    /// `Database::set_lru_capacity_by_name` (bur fork of salsa) is that door.
+    ///
+    /// A name matching nothing is a configuration error — an upstream rename, or
+    /// a query that stopped being capped — and is reported instead of silently
+    /// doing nothing, which is how this whole area rotted in the first place.
+    ///
+    /// Note `capacity == 0` DISABLES eviction rather than emptying the cache;
+    /// `1` is the smallest cache that still evicts.
+    fn set_query_lru_capacity(&mut self, query: &str, capacity: u16) {
+        if salsa::Database::set_lru_capacity_by_name(self, query, capacity as usize) == 0 {
+            tracing::warn!(
+                "no tracked query named `{query}` has a tunable LRU capacity; \
+                 the requested capacity {capacity} was not applied"
+            );
+        }
     }
 
-    pub fn update_lru_capacities(&mut self, _lru_capacities: &FxHashMap<Box<str>, u16>) {
-        // FIXME(salsa-transition): bring this back; allow changing LRU settings at runtime.
-        // use hir::db as hir_db;
+    pub fn update_base_query_lru_capacities(&mut self, lru_capacity: Option<u16>) {
+        let lru_capacity = lru_capacity.unwrap_or(base_db::DEFAULT_PARSE_LRU_CAP);
+        self.set_query_lru_capacity("EditionedFileId::parse", lru_capacity);
+        // macro expansions are usually rather small, so we can afford to keep more of them alive
+        self.set_query_lru_capacity(
+            "MacroCallId::parse_macro_expansion",
+            lru_capacity.saturating_mul(4),
+        );
+        // The fixed numbers below are the `lru = N` each query already carries in
+        // its attribute, restated so that a later call cannot leave a query at
+        // whatever a previous configuration set. Deliberately today's upstream
+        // tuning and not the pre-salsa-transition code that used to sit here —
+        // that code asked for 2048 on the body/source-map query, upstream has
+        // since settled on 512.
+        self.set_query_lru_capacity("HirFileId::ast_id_map", lru_capacity.saturating_mul(8));
+        self.set_query_lru_capacity("Body::with_source_map", 512);
+        // Inference is the one query bur caps that upstream does not; see the
+        // `lru` attribute on `InferenceResult::for_body` in hir-ty for why.
+        self.set_query_lru_capacity(
+            "InferenceResult::for_body",
+            base_db::DEFAULT_BORROWCK_LRU_CAP,
+        );
+        // `file_text` is intentionally absent: it carries no `lru` attribute
+        // upstream any more, so naming it here would only log a warning.
+    }
 
-        // base_db::FileTextQuery.in_db_mut(self).set_lru_capacity(DEFAULT_FILE_TEXT_LRU_CAP);
-        // base_db::ParseQuery.in_db_mut(self).set_lru_capacity(
-        //     lru_capacities
-        //         .get(stringify!(ParseQuery))
-        //         .copied()
-        //         .unwrap_or(base_db::DEFAULT_PARSE_LRU_CAP),
-        // );
-        // hir_db::ParseMacroExpansionQuery.in_db_mut(self).set_lru_capacity(
-        //     lru_capacities
-        //         .get(stringify!(ParseMacroExpansionQuery))
-        //         .copied()
-        //         .unwrap_or(4 * base_db::DEFAULT_PARSE_LRU_CAP),
-        // );
-        // hir_db::BorrowckQuery.in_db_mut(self).set_lru_capacity(
-        //     lru_capacities
-        //         .get(stringify!(BorrowckQuery))
-        //         .copied()
-        //         .unwrap_or(base_db::DEFAULT_BORROWCK_LRU_CAP),
-        // );
-        // hir::db::BodyWithSourceMapQuery.in_db_mut(self).set_lru_capacity(2048);
+    pub fn update_lru_capacities(&mut self, lru_capacities: &FxHashMap<Box<str>, u16>) {
+        // Defaults first: a map that mentions one query must not leave the others
+        // wherever an earlier call happened to put them.
+        self.update_base_query_lru_capacities(
+            lru_capacities.get("EditionedFileId::parse").copied(),
+        );
+        for (query, capacity) in lru_capacities {
+            self.set_query_lru_capacity(query, *capacity);
+        }
     }
 }
 

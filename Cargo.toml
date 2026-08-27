@@ -124,7 +124,13 @@ rayon = "1.10.0"
 rowan = "0.17.0"
 # Ideally we'd not enable the macros feature but unfortunately the `tracked` attribute does not work
 # on impls without it
-salsa = { version = "0.28.2", default-features = false, features = [
+# bur fork: adds runtime LRU-capacity tuning addressed by ingredient name. The
+# generated `set_lru_capacity` is private to the declaring module, and for an
+# associated tracked fn it is generated inside the outer function's body, so no
+# real query here (`parse`, `body_with_source_map`, inference) can be retuned
+# through it — which is why `update_lru_capacities` below was left commented out
+# after the salsa transition. Upstream anticipated a local salsa; see line 47.
+salsa = { path = "../salsa-bur", version = "0.28.2", default-features = false, features = [
     "rayon",
     "salsa_unstable",
     "macros",

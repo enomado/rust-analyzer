@@ -1079,7 +1079,21 @@ pub enum UpvarCapture {
 
 #[salsa::tracked]
 impl<'db> InferenceResult<'db> {
-    #[salsa::tracked(returns(ref), cycle_result = infer_cycle_result)]
+    // `lru` here is a downstream (bur fork) addition: upstream leaves this query
+    // uncapped, so its memos are never eligible for eviction and a long-lived
+    // process accumulates one `InferenceResult` per body it has ever looked at.
+    // That is the single largest holder in a daemon that answers queries for many
+    // workspaces and never exits.
+    //
+    // The number is deliberately the same magnitude as `DEFAULT_BORROWCK_LRU_CAP`
+    // (base-db): borrowck is the other per-body heavy query, and it is the closest
+    // precedent upstream itself set. It is a first cut, not a measurement — if it
+    // has to move, this literal is the only place to touch (salsa parses `lru` as
+    // an integer literal, so it cannot reference the constant).
+    //
+    // `lru` composes with `cycle_result`; salsa only forbids combining it with
+    // `specify` (salsa-macros/src/tracked_fn.rs:153).
+    #[salsa::tracked(returns(ref), lru = 2024, cycle_result = infer_cycle_result)]
     fn for_body(db: &dyn HirDatabase, def: DefWithBodyId) -> InferenceResult<'_> {
         infer_query(db, def)
     }

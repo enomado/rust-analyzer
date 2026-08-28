@@ -86,7 +86,11 @@ impl ops::Deref for BodySourceMap {
 
 #[salsa::tracked]
 impl Body {
-    #[salsa::tracked(lru = 512, returns(ref))]
+    // The `heap_size` is what turns this ingredient's line in a
+    // `Database::memory_usage()` report from a memo count into bytes; see
+    // `crate::expr_store::heap_size` for what the number does and does not
+    // include, and for why `Body::of` below deliberately has no such option.
+    #[salsa::tracked(lru = 512, returns(ref), heap_size = crate::expr_store::heap_size::body_with_source_map)]
     pub fn with_source_map(
         db: &dyn SourceDatabase,
         def: DefWithBodyId,

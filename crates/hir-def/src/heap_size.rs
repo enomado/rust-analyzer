@@ -12,6 +12,12 @@
 //! which owns the body/signature half), and the entry points for the queries
 //! whose result types live here.
 //!
+//! The container half is `pub` because `hir-ty` weighs inference results with
+//! the same arithmetic. Subtle parts of it — hashbrown's per-bucket control
+//! byte, a `ThinVec`'s shared empty static, a `SmallVec` that never spilled —
+//! are exactly the places a second copy would get wrong in a way no test would
+//! notice, since every answer is a plausible number.
+//!
 //! # What the numbers mean
 //!
 //! They count the *owned buffers*: arenas, map and slice allocations hanging
@@ -32,12 +38,13 @@
 
 use std::{collections::HashMap, hash::BuildHasher, mem::size_of};
 
+use indexmap::IndexMap;
 use la_arena::{Arena, ArenaMap, Idx};
 use rustc_hash::FxHashSet;
 use smallvec::SmallVec;
 use thin_vec::ThinVec;
 
-use crate::{FxIndexMap, item_tree::ItemTree, nameres::DefMap, nameres::LocalDefMap};
+use crate::{item_tree::ItemTree, nameres::DefMap, nameres::LocalDefMap};
 
 // -------------------------------------------------------------- entry points
 
@@ -69,7 +76,7 @@ pub(crate) fn file_item_tree(tree: &Option<Box<ItemTree>>) -> usize {
 
 /// An arena is a `Vec<T>`, and lowering calls `shrink_to_fit` on these once it
 /// is done, so the length is the allocation rather than merely the fill.
-pub(crate) fn arena<T>(arena: &Arena<T>) -> usize {
+pub fn arena<T>(arena: &Arena<T>) -> usize {
     arena.len() * size_of::<T>()
 }
 
@@ -77,12 +84,12 @@ pub(crate) fn arena<T>(arena: &Arena<T>) -> usize {
 /// exposes neither its length nor its capacity — only the occupied slots. Its
 /// holes therefore go uncounted. The maps here are dense (a source for every
 /// expression), so the gap is small, and it errs low like everything else.
-pub(crate) fn arena_map<T, V>(map: &ArenaMap<Idx<T>, V>) -> usize {
+pub fn arena_map<T, V>(map: &ArenaMap<Idx<T>, V>) -> usize {
     map.values().count() * size_of::<Option<V>>()
 }
 
 /// [`arena_map`] for a map whose values own heap of their own.
-pub(crate) fn arena_map_with<T, V>(
+pub fn arena_map_with<T, V>(
     map: &ArenaMap<Idx<T>, V>,
     per_value: impl Fn(&V) -> usize,
 ) -> usize {
@@ -91,12 +98,12 @@ pub(crate) fn arena_map_with<T, V>(
 
 /// hashbrown allocates for `capacity`, not for `len`, and keeps one control
 /// byte per bucket beside the bucket itself.
-pub(crate) fn hash_map<K, V, S: BuildHasher>(map: &HashMap<K, V, S>) -> usize {
+pub fn hash_map<K, V, S: BuildHasher>(map: &HashMap<K, V, S>) -> usize {
     map.capacity() * (size_of::<(K, V)>() + 1)
 }
 
 /// [`hash_map`] for a map whose values own heap of their own.
-pub(crate) fn hash_map_with<K, V, S: BuildHasher>(
+pub fn hash_map_with<K, V, S: BuildHasher>(
     map: &HashMap<K, V, S>,
     per_value: impl Fn(&V) -> usize,
 ) -> usize {
@@ -104,7 +111,7 @@ pub(crate) fn hash_map_with<K, V, S: BuildHasher>(
 }
 
 /// A set is a map to `()`; hashbrown stores the same control byte per bucket.
-pub(crate) fn hash_set<T>(set: &FxHashSet<T>) -> usize {
+pub fn hash_set<T>(set: &FxHashSet<T>) -> usize {
     set.capacity() * (size_of::<T>() + 1)
 }
 
@@ -113,43 +120,47 @@ pub(crate) fn hash_set<T>(set: &FxHashSet<T>) -> usize {
 /// nameable from here, so this counts the entry vector as
 /// `capacity * (usize + K + V)` and leaves the index table and any bucket
 /// padding out — lower bound, as everywhere else.
-pub(crate) fn index_map<K, V>(map: &FxIndexMap<K, V>) -> usize {
+///
+/// Generic over the hasher, not written against [`crate::FxIndexMap`]: `base-db`
+/// spells the same alias with `BuildHasherDefault<FxHasher>` where this crate
+/// uses `FxBuildHasher`, and those are two distinct types.
+pub fn index_map<K, V, S>(map: &IndexMap<K, V, S>) -> usize {
     map.capacity() * (size_of::<usize>() + size_of::<K>() + size_of::<V>())
 }
 
 /// [`index_map`] for a map whose values own heap of their own.
-pub(crate) fn index_map_with<K, V>(
-    map: &FxIndexMap<K, V>,
+pub fn index_map_with<K, V, S>(
+    map: &IndexMap<K, V, S>,
     per_value: impl Fn(&V) -> usize,
 ) -> usize {
     index_map(map) + map.values().map(per_value).sum::<usize>()
 }
 
-pub(crate) fn slice<T>(slice: &[T]) -> usize {
+pub fn slice<T>(slice: &[T]) -> usize {
     slice.len() * size_of::<T>()
 }
 
-pub(crate) fn vec<T>(vec: &Vec<T>) -> usize {
+pub fn vec<T>(vec: &Vec<T>) -> usize {
     vec.capacity() * size_of::<T>()
 }
 
 /// A `SmallVec` that never spilled lives in its inline array and owns nothing —
 /// counting it as heap would attribute the enclosing struct's own bytes twice.
-pub(crate) fn small_vec<A: smallvec::Array>(vec: &SmallVec<A>) -> usize {
+pub fn small_vec<A: smallvec::Array>(vec: &SmallVec<A>) -> usize {
     if vec.spilled() { vec.capacity() * size_of::<A::Item>() } else { 0 }
 }
 
 /// An empty `ThinVec` points at a shared static and owns nothing; a non-empty
 /// one owns a header plus its elements, and reports `capacity() == 0` when
 /// empty, so the multiplication covers both cases.
-pub(crate) fn thin_vec<T>(vec: &ThinVec<T>) -> usize {
+pub fn thin_vec<T>(vec: &ThinVec<T>) -> usize {
     vec.capacity() * size_of::<T>()
 }
 
 /// The allocation a `Box` makes for the value it points at, plus whatever that
 /// value owns in turn. Spelled out because it is easy to charge for the pointee
 /// and forget the box itself.
-pub(crate) fn boxed<T>(value: &Option<Box<T>>, owned: impl Fn(&T) -> usize) -> usize {
+pub fn boxed<T>(value: &Option<Box<T>>, owned: impl Fn(&T) -> usize) -> usize {
     value.as_ref().map_or(0, |value| size_of::<T>() + owned(value))
 }
 

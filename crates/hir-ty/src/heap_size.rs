@@ -90,6 +90,24 @@ mod tests {
         format!("fn f() {{ {} }}", statements.collect::<String>())
     }
 
+    /// Over-counting is the failure mode this family cannot afford: a number
+    /// too big moves its ingredient up the report on bytes that do not exist,
+    /// and every wrong answer still looks plausible. An empty body owns nearly
+    /// nothing, so its weight is where an over-count shows up undisguised.
+    ///
+    /// Measured while this was written: 8 bytes per expression statement, flat
+    /// from 200 of them to 2000 — one `Option<StoredTy>` slot each, which is
+    /// what the arithmetic claims to count and nothing besides.
+    #[test]
+    fn an_empty_body_owns_almost_nothing() {
+        let empty = heap("fn f() {}");
+        assert!(
+            empty < 1024,
+            "an empty function body reported {empty} bytes of heap — that is an over-count, and \
+             every other number in this family carries the same error"
+        );
+    }
+
     /// The dense half: a type is recorded for every expression in the body, and
     /// that map is where most of a big body's bytes are.
     ///

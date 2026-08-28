@@ -38,6 +38,7 @@ mod validation;
 
 pub mod algo;
 pub mod ast;
+pub mod heap_size;
 #[doc(hidden)]
 pub mod fuzz;
 pub mod hacks;

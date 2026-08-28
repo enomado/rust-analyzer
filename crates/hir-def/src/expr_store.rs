@@ -2,6 +2,9 @@
 //! consts.
 pub mod body;
 mod expander;
+// Sibling modules reach in for the `heap_size` options on their own tracked
+// queries; the module itself stays crate-internal.
+pub(crate) mod heap_size;
 pub mod lower;
 pub mod path;
 pub mod pretty;
@@ -236,10 +239,10 @@ pub struct ExpressionStoreSourceMap {
     types_map: FxHashMap<TypeSource, TypeRefId>,
 
     lifetime_map_back: ArenaMap<LifetimeRefId, LifetimeSource>,
-    #[expect(
-        unused,
-        reason = "this is here for completeness, and maybe we'll need it in the future"
-    )]
+    // Here for completeness, and maybe we'll need it in the future. Nothing
+    // *reads* it for lowering, but it is allocated like any other field, so
+    // `heap_size` counts it — which is also why it can no longer carry an
+    // `#[expect(unused)]`: the expectation would go unfulfilled.
     lifetime_map: FxHashMap<LifetimeSource, LifetimeRefId>,
 }
 

@@ -1155,7 +1155,9 @@ impl<'db> InferenceResult<'db> {
     /// upstream stops this compiling instead of silently dropping out of the
     /// total. A byte count that quietly goes stale across a rebase is worse
     /// than none, because every answer it gives still looks plausible.
-    pub(crate) fn heap_size(&self) -> usize {
+    ///
+    /// Public only so the fixture tests in `hir-ide` can reach it.
+    pub fn heap_size(&self) -> usize {
         use hir_def::heap_size::{
             arena_map, boxed, hash_map, hash_map_with, hash_set, slice, thin_vec, vec,
         };

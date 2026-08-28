@@ -5,6 +5,7 @@ mod consteval;
 mod diagnostics;
 mod display_source_code;
 mod dyn_compatibility;
+mod heap_size;
 mod incremental;
 mod layout;
 mod macros;

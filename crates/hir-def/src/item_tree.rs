@@ -137,7 +137,7 @@ pub fn file_item_tree(db: &dyn SourceDatabase, file_id: HirFileId, krate: Crate)
     }
 }
 
-#[salsa::tracked(returns(ref))]
+#[salsa::tracked(returns(ref), heap_size = crate::heap_size::file_item_tree)]
 fn file_item_tree_query(
     db: &dyn SourceDatabase,
     file_id: HirFileId,
@@ -188,7 +188,7 @@ fn file_item_tree_query(
     }
 }
 
-#[salsa::tracked(returns(ref))]
+#[salsa::tracked(returns(ref), heap_size = crate::heap_size::item_tree)]
 pub(crate) fn block_item_tree_query(
     db: &dyn SourceDatabase,
     block: BlockId,
@@ -279,6 +279,23 @@ impl ItemTree {
         big_data.shrink_to_fit();
         small_data.shrink_to_fit();
         vis.arena.shrink_to_fit();
+    }
+
+    /// The buffers this tree owns, for the `heap_size` of the two queries that
+    /// build one. See [`crate::heap_size`] for what such a number includes.
+    ///
+    /// Destructured rather than field-by-field so that a field added upstream
+    /// stops the build here instead of silently going uncounted — the failure
+    /// mode of a size function is a number that stays plausible while it drifts.
+    /// [`Self::finalize`] has shrunk all four vectors by now, so their capacity
+    /// is their length.
+    pub(crate) fn heap_size(&self) -> usize {
+        let ItemTree { top_level, attrs, vis, big_data, small_data } = self;
+        crate::heap_size::slice(top_level)
+            + crate::heap_size::thin_vec(attrs)
+            + crate::heap_size::thin_vec(&vis.arena)
+            + crate::heap_size::thin_vec(big_data)
+            + crate::heap_size::thin_vec(small_data)
     }
 }
 

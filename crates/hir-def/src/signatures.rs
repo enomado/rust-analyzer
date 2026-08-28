@@ -81,7 +81,7 @@ impl StructSignature {
         Self::with_source_map(db, id).0.clone()
     }
 
-    #[salsa::tracked(returns(ref))]
+    #[salsa::tracked(returns(ref), heap_size = crate::expr_store::heap_size::signature_with_source_map)]
     pub fn with_source_map(
         db: &dyn SourceDatabase,
         id: StructId,
@@ -170,7 +170,7 @@ impl UnionSignature {
         Self::with_source_map(db, id).0.clone()
     }
 
-    #[salsa::tracked(returns(ref))]
+    #[salsa::tracked(returns(ref), heap_size = crate::expr_store::heap_size::signature_with_source_map)]
     pub fn with_source_map(
         db: &dyn SourceDatabase,
         id: UnionId,
@@ -246,7 +246,7 @@ impl EnumSignature {
         Self::with_source_map(db, id).0.clone()
     }
 
-    #[salsa::tracked(returns(ref))]
+    #[salsa::tracked(returns(ref), heap_size = crate::expr_store::heap_size::signature_with_source_map)]
     pub fn with_source_map(
         db: &dyn SourceDatabase,
         id: EnumId,
@@ -328,7 +328,7 @@ impl ConstSignature {
         Self::with_source_map(db, id).0.clone()
     }
 
-    #[salsa::tracked(returns(ref))]
+    #[salsa::tracked(returns(ref), heap_size = crate::expr_store::heap_size::signature_with_source_map)]
     pub fn with_source_map(
         db: &dyn SourceDatabase,
         id: ConstId,
@@ -396,7 +396,7 @@ impl StaticSignature {
         Self::with_source_map(db, id).0.clone()
     }
 
-    #[salsa::tracked(returns(ref))]
+    #[salsa::tracked(returns(ref), heap_size = crate::expr_store::heap_size::signature_with_source_map)]
     pub fn with_source_map(
         db: &dyn SourceDatabase,
         id: StaticId,
@@ -468,7 +468,7 @@ impl ImplSignature {
         Self::with_source_map(db, id).0.clone()
     }
 
-    #[salsa::tracked(returns(ref))]
+    #[salsa::tracked(returns(ref), heap_size = crate::expr_store::heap_size::signature_with_source_map)]
     pub fn with_source_map(
         db: &dyn SourceDatabase,
         id: ImplId,
@@ -539,7 +539,7 @@ impl TraitSignature {
         Self::with_source_map(db, id).0.clone()
     }
 
-    #[salsa::tracked(returns(ref))]
+    #[salsa::tracked(returns(ref), heap_size = crate::expr_store::heap_size::signature_with_source_map)]
     pub fn with_source_map(
         db: &dyn SourceDatabase,
         id: TraitId,
@@ -627,7 +627,7 @@ impl FunctionSignature {
         Self::with_source_map(db, id).0.clone()
     }
 
-    #[salsa::tracked(returns(ref))]
+    #[salsa::tracked(returns(ref), heap_size = crate::expr_store::heap_size::signature_with_source_map)]
     pub fn with_source_map(
         db: &dyn SourceDatabase,
         id: FunctionId,
@@ -813,7 +813,7 @@ impl TypeAliasSignature {
         Self::with_source_map(db, id).0.clone()
     }
 
-    #[salsa::tracked(returns(ref))]
+    #[salsa::tracked(returns(ref), heap_size = crate::expr_store::heap_size::signature_with_source_map)]
     pub fn with_source_map(
         db: &dyn SourceDatabase,
         id: TypeAliasId,
@@ -876,7 +876,7 @@ pub struct VariantFields {
 
 #[salsa::tracked]
 impl VariantFields {
-    #[salsa::tracked(returns(ref))]
+    #[salsa::tracked(returns(ref), heap_size = crate::expr_store::heap_size::signature_with_source_map)]
     pub fn with_source_map(
         db: &dyn SourceDatabase,
         id: VariantId,

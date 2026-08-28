@@ -19,7 +19,10 @@ pub struct EditionedFileId {
 
 #[salsa::tracked]
 impl EditionedFileId {
-    #[salsa::tracked(lru = 128, returns(clone))]
+    // The `heap_size` is what lets a memory report weigh parses against
+    // everything else instead of merely counting them; see
+    // `syntax::heap_size` for what the number includes.
+    #[salsa::tracked(lru = 128, returns(clone), heap_size = syntax::heap_size::parse)]
     pub fn parse(self, db: &dyn SourceDatabase) -> syntax::Parse<ast::SourceFile> {
         let _p = tracing::info_span!("parse", ?self).entered();
         let (file_id, edition) = self.unpack(db);

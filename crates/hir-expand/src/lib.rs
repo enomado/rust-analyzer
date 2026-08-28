@@ -24,6 +24,7 @@ pub mod span_map;
 
 mod cfg_process;
 mod fixup;
+mod heap_size;
 mod prettify_macro_expansion_;
 
 use salsa::plumbing::{AsId, FromId};
@@ -488,7 +489,7 @@ impl MacroCallId {
     /// Implementation of [`HirFileId::parse_or_expand`] for the macro case.
     // FIXME: We should verify that the parsed node is one of the many macro node variants we expect
     // instead of having it be untyped
-    #[salsa::tracked(returns(ref), lru = 512)]
+    #[salsa::tracked(returns(ref), lru = 512, heap_size = crate::heap_size::parse_macro_expansion)]
     pub fn parse_macro_expansion(
         self,
         db: &dyn SourceDatabase,

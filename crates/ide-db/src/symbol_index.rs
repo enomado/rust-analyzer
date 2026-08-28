@@ -365,13 +365,26 @@ pub struct SymbolIndex<'db> {
     map: fst::Map<Vec<u8>>,
 }
 
+/// `heap_size` for the three queries that build a symbol index. salsa reports
+/// it from `Database::memory_usage`, which without it can say how many indices
+/// a workspace accumulated but not what they weigh — and a symbol index is one
+/// of the few query results here that carries a real byte buffer.
+///
+/// A `FileSymbol` owns nothing: its name and container are interned symbols and
+/// its location is ids and ranges. So the whole index is the symbol slice plus
+/// the automaton the names were compiled into.
+fn heap_size(index: &SymbolIndex<'_>) -> usize {
+    let SymbolIndex { symbols, map } = index;
+    size_of_val(&**symbols) + map.as_fst().as_bytes().len()
+}
+
 impl<'db> SymbolIndex<'db> {
     /// The symbol index for a given source root within library_roots.
     pub fn library_symbols(
         db: &'db dyn HirDatabase,
         source_root_id: SourceRootId,
     ) -> &'db SymbolIndex<'db> {
-        #[salsa::tracked(returns(ref))]
+        #[salsa::tracked(returns(ref), heap_size = crate::symbol_index::heap_size)]
         fn library_symbols<'db>(
             db: &'db dyn HirDatabase,
             source_root_id: InternedSourceRootId<'db>,
@@ -399,7 +412,7 @@ impl<'db> SymbolIndex<'db> {
     /// The symbol index for a given module. These modules should only be in source roots that
     /// are inside local_roots.
     pub fn module_symbols(db: &dyn HirDatabase, module: Module) -> &SymbolIndex<'_> {
-        #[salsa::tracked(returns(ref))]
+        #[salsa::tracked(returns(ref), heap_size = crate::symbol_index::heap_size)]
         fn module_symbols<'db>(
             db: &'db dyn HirDatabase,
             module: hir::ModuleId,
@@ -422,7 +435,7 @@ impl<'db> SymbolIndex<'db> {
 
     /// The symbol index for all extern prelude crates.
     pub fn extern_prelude_symbols(db: &dyn HirDatabase) -> &SymbolIndex<'_> {
-        #[salsa::tracked(returns(ref))]
+        #[salsa::tracked(returns(ref), heap_size = crate::symbol_index::heap_size)]
         fn extern_prelude_symbols<'db>(db: &'db dyn HirDatabase) -> SymbolIndex<'db> {
             let _p = tracing::info_span!("extern_prelude_symbols").entered();
 
@@ -642,6 +655,45 @@ mod tests {
     use test_fixture::{WORKSPACE, WithFixture};
 
     use super::*;
+
+    /// Both halves of what an index owns get their own assertion: the symbol
+    /// slice and the automaton its names were compiled into.
+    ///
+    /// Comparing two fixtures would NOT do it. A bigger fixture grows both
+    /// halves at once, so "more symbols weigh more" stays green with the slice
+    /// unmeasured — checked by mutation, and it survived. What separates them is
+    /// that the total has to exceed *either half on its own*.
+    #[test]
+    fn a_symbol_index_weighs_both_its_symbols_and_its_automaton() {
+        let declarations = (0..40).map(|i| format!("struct N{i};\n")).collect::<String>();
+        let (db, _) = RootDatabase::with_single_file(&declarations);
+        let module = Crate::from(db.test_crate()).modules(&db).into_iter().next().unwrap();
+        let index = SymbolIndex::new(SymbolCollector::new_module(&db, module, false));
+
+        let symbols_bytes = size_of_val(&*index.symbols);
+        let automaton_bytes = index.map.as_fst().as_bytes().len();
+        let total = heap_size(&index);
+
+        // Neither comparison below says anything if one of the halves is empty.
+        assert!(
+            symbols_bytes > 0 && automaton_bytes > 0,
+            "the fixture produced an index with an empty half ({symbols_bytes} symbol bytes, \
+             {automaton_bytes} automaton bytes), so there is nothing to prove"
+        );
+        // Automaton first: with the slice unmeasured the total falls below
+        // BOTH bounds, and whichever assertion runs first is the one whose
+        // message the reader gets.
+        assert!(
+            total > automaton_bytes,
+            "the whole index weighs no more than its automaton ({total} bytes): the symbol slice \
+             is missing from the total"
+        );
+        assert!(
+            total > symbols_bytes,
+            "the whole index weighs no more than its symbol slice ({total} bytes): the automaton \
+             the names compile into is missing from the total"
+        );
+    }
 
     #[test]
     fn test_symbol_index_collection() {

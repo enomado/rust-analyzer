@@ -171,6 +171,71 @@ pub struct ItemScope {
     derive_macros: FxHashMap<AstId<ast::Adt>, SmallVec<[DeriveMacroInvocation; 1]>>,
 }
 
+impl ItemScope {
+    /// The buffers one module's scope owns, for the `heap_size` of the def map
+    /// that holds it. See [`crate::heap_size`] for what such a number includes.
+    ///
+    /// Destructured rather than field-by-field so that a field added upstream
+    /// stops the build here instead of silently going uncounted. A scope is
+    /// almost entirely maps, and there are twenty of them — which is why the
+    /// def map is worth weighing at all.
+    pub(crate) fn heap_size(&self) -> usize {
+        use crate::heap_size::{hash_map, hash_map_with, hash_set, index_map, small_vec, thin_vec};
+
+        let ItemScope {
+            types,
+            values,
+            macros,
+            unresolved,
+            declarations,
+            impls,
+            builtin_derive_impls,
+            extern_blocks,
+            unnamed_consts,
+            unnamed_trait_imports,
+            use_imports_types,
+            use_imports_values,
+            use_imports_macros,
+            use_decls,
+            extern_crate_decls,
+            legacy_macros,
+            attr_macros,
+            macro_invocations,
+            derive_macros,
+        } = self;
+
+        // `Name` is an interned symbol, so every key here is a plain id.
+        index_map(types)
+            + index_map(values)
+            + index_map(macros)
+            + hash_set(unresolved)
+            + thin_vec(declarations)
+            + thin_vec(impls)
+            + thin_vec(builtin_derive_impls)
+            + thin_vec(extern_blocks)
+            + thin_vec(unnamed_consts)
+            + thin_vec(unnamed_trait_imports)
+            + hash_map(use_imports_types)
+            + hash_map(use_imports_values)
+            + hash_map(use_imports_macros)
+            + thin_vec(use_decls)
+            + thin_vec(extern_crate_decls)
+            + hash_map_with(legacy_macros, small_vec)
+            + hash_map(attr_macros)
+            + hash_map(macro_invocations)
+            // Two levels of `SmallVec`: the invocations for one item, and the
+            // derive calls within each. Both are inline until they spill, and
+            // `small_vec` charges nothing while they have not.
+            + hash_map_with(derive_macros, |invocations| {
+                small_vec(invocations)
+                    + invocations
+                        .iter()
+                        .map(|invocation| small_vec(&invocation.derive_call_ids))
+                        .sum::<usize>()
+            })
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 struct DeriveMacroInvocation {
     attr_id: AttrId,

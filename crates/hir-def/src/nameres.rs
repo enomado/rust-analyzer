@@ -144,6 +144,12 @@ impl std::hash::Hash for LocalDefMap {
 }
 
 impl LocalDefMap {
+    /// The buffers this map owns; see [`crate::heap_size`].
+    pub(crate) fn heap_size(&self) -> usize {
+        let Self { extern_prelude } = self;
+        crate::heap_size::index_map(extern_prelude)
+    }
+
     pub(crate) const EMPTY: &Self =
         &Self { extern_prelude: FxIndexMap::with_hasher(rustc_hash::FxBuildHasher) };
 
@@ -227,6 +233,31 @@ struct DefMapCrateData {
 }
 
 impl DefMapCrateData {
+    /// The buffers shared by a crate's def map and all its block def maps; see
+    /// [`DefMap::heap_size`] for who charges for them.
+    fn heap_size(&self) -> usize {
+        use crate::heap_size::{hash_map, hash_map_with, slice, vec};
+
+        let DefMapCrateData {
+            exported_derives,
+            fn_proc_macro_mapping,
+            fn_proc_macro_mapping_back,
+            registered_tools,
+            unstable_features: _,
+            rustc_coherence_is_core: _,
+            no_core: _,
+            no_std: _,
+            edition: _,
+            recursion_limit: _,
+        } = self;
+
+        hash_map_with(exported_derives, |names| slice(names))
+            + hash_map(fn_proc_macro_mapping)
+            + hash_map(fn_proc_macro_mapping_back)
+            // `Symbol` is interned: the vector owns its slots, not the strings.
+            + vec(registered_tools)
+    }
+
     fn new(edition: Edition) -> Self {
         Self {
             exported_derives: FxHashMap::default(),
@@ -381,7 +412,10 @@ pub fn crate_def_map(db: &dyn SourceDatabase, crate_id: Crate) -> &DefMap {
     crate_local_def_map(db, crate_id).def_map(db)
 }
 
-#[salsa::tracked]
+// The `heap_size` sits on the struct rather than on `crate_local_def_map`
+// below: that query returns this struct, so its own memo holds an id and
+// nothing else, and a crate's def map — the big one — lives here.
+#[salsa::tracked(heap_size = crate::heap_size::def_map_pair)]
 pub(crate) struct DefMapPair<'db> {
     #[tracked]
     #[returns(ref)]
@@ -424,7 +458,7 @@ pub(crate) fn crate_local_def_map(db: &dyn SourceDatabase, crate_id: Crate) -> D
     DefMapPair::new(db, def_map, local_def_map)
 }
 
-#[salsa::tracked(returns(ref))]
+#[salsa::tracked(returns(ref), heap_size = crate::heap_size::def_map)]
 pub fn block_def_map<'db>(db: &'db dyn SourceDatabase, block_id: BlockIdLt<'db>) -> DefMap {
     let block_id = unsafe { block_id.to_static() };
     let ast_id = block_id.ast_id(db);
@@ -456,6 +490,47 @@ pub fn block_def_map<'db>(db: &'db dyn SourceDatabase, block_id: BlockIdLt<'db>)
 impl DefMap {
     pub fn edition(&self) -> Edition {
         self.data.edition
+    }
+
+    /// The buffers this def map owns, for the `heap_size` of the queries that
+    /// build one. See [`crate::heap_size`] for what such a number includes.
+    ///
+    /// 🔑 `data` is charged to the crate's def map ALONE. Every block def map in
+    /// the crate holds a clone of that same `Arc` (see [`block_def_map`]), and
+    /// a workspace has thousands of block def maps against a couple of hundred
+    /// crates — charging each of them would report one allocation thousands of
+    /// times and put this query at the top of the report on bytes that do not
+    /// exist. The `block` field is what tells the two apart.
+    ///
+    /// Destructured so that a field added upstream stops the build here rather
+    /// than going silently uncounted.
+    pub(crate) fn heap_size(&self) -> usize {
+        use crate::heap_size::{hash_map, hash_map_with, index_map_with, vec};
+
+        let DefMap {
+            krate: _,
+            block,
+            root: _,
+            modules,
+            prelude: _,
+            macro_use_prelude,
+            derive_helpers_in_scope,
+            macro_def_to_macro_id,
+            diagnostics,
+            data,
+        } = self;
+
+        let crate_data = match block {
+            Some(_) => 0,
+            None => size_of::<DefMapCrateData>() + data.heap_size(),
+        };
+
+        index_map_with(&modules.inner, ModuleData::heap_size)
+            + hash_map(macro_use_prelude)
+            + hash_map_with(derive_helpers_in_scope, vec)
+            + hash_map(macro_def_to_macro_id)
+            + vec(diagnostics)
+            + crate_data
     }
 
     fn empty(
@@ -750,6 +825,13 @@ impl DefMap {
 }
 
 impl ModuleData {
+    /// What one module inside a def map owns; see [`crate::heap_size`]. Nearly
+    /// all of it is the item scope.
+    pub(crate) fn heap_size(&self) -> usize {
+        let ModuleData { origin: _, visibility: _, parent: _, children, scope } = self;
+        crate::heap_size::index_map(children) + scope.heap_size()
+    }
+
     pub(crate) fn new(
         origin: ModuleOrigin,
         visibility: Visibility,

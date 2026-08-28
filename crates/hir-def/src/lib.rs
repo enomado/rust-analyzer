@@ -20,6 +20,7 @@ pub extern crate ra_ap_rustc_abi as rustc_abi;
 
 pub mod attrs;
 pub mod builtin_type;
+pub(crate) mod heap_size;
 pub mod item_scope;
 pub mod per_ns;
 

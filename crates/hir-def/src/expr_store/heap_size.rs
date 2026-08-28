@@ -30,11 +30,6 @@
 //! `Body::of` keeps answering `None` ("not measured") rather than `Some(0)`
 //! ("measured, empty").
 
-use std::{collections::HashMap, hash::BuildHasher, mem::size_of};
-
-use la_arena::{Arena, ArenaMap, Idx};
-use smallvec::SmallVec;
-use thin_vec::ThinVec;
 use triomphe::Arc;
 
 use crate::{
@@ -42,6 +37,12 @@ use crate::{
         ExpressionOnlySourceMap, ExpressionOnlyStore, ExpressionStore, ExpressionStoreSourceMap,
         FormatTemplate,
         body::{Body, BodySourceMap},
+    },
+    // The container arithmetic is shared with the crate's other `heap_size`
+    // entry points, and lives beside them.
+    heap_size::{
+        arena, arena_map, arena_map_with, boxed, hash_map, hash_map_with, slice, small_vec,
+        thin_vec, vec,
     },
     hir::generics::GenericParams,
     signatures::{
@@ -108,69 +109,6 @@ signature_heap! {
 
 fn generic_params_heap(params: &GenericParams) -> usize {
     arena(&params.type_or_consts) + arena(&params.lifetimes) + slice(&params.where_predicates)
-}
-
-// ---------------------------------------------------------------- containers
-
-/// An arena is a `Vec<T>`, and lowering calls `shrink_to_fit` on these once it
-/// is done, so the length is the allocation rather than merely the fill.
-fn arena<T>(arena: &Arena<T>) -> usize {
-    arena.len() * size_of::<T>()
-}
-
-/// An `ArenaMap` is a `Vec<Option<V>>` indexed by arena position, but it
-/// exposes neither its length nor its capacity — only the occupied slots. Its
-/// holes therefore go uncounted. The maps here are dense (a source for every
-/// expression), so the gap is small, and it errs low like everything else.
-fn arena_map<T, V>(map: &ArenaMap<Idx<T>, V>) -> usize {
-    map.values().count() * size_of::<Option<V>>()
-}
-
-/// [`arena_map`] for a map whose values own heap of their own.
-fn arena_map_with<T, V>(map: &ArenaMap<Idx<T>, V>, per_value: impl Fn(&V) -> usize) -> usize {
-    map.values().map(|value| size_of::<Option<V>>() + per_value(value)).sum()
-}
-
-/// hashbrown allocates for `capacity`, not for `len`, and keeps one control
-/// byte per bucket beside the bucket itself.
-fn hash_map<K, V, S: BuildHasher>(map: &HashMap<K, V, S>) -> usize {
-    map.capacity() * (size_of::<(K, V)>() + 1)
-}
-
-/// [`hash_map`] for a map whose values own heap of their own.
-fn hash_map_with<K, V, S: BuildHasher>(
-    map: &HashMap<K, V, S>,
-    per_value: impl Fn(&V) -> usize,
-) -> usize {
-    hash_map(map) + map.values().map(per_value).sum::<usize>()
-}
-
-fn slice<T>(slice: &[T]) -> usize {
-    slice.len() * size_of::<T>()
-}
-
-fn vec<T>(vec: &Vec<T>) -> usize {
-    vec.capacity() * size_of::<T>()
-}
-
-/// A `SmallVec` that never spilled lives in its inline array and owns nothing —
-/// counting it as heap would attribute the enclosing struct's own bytes twice.
-fn small_vec<A: smallvec::Array>(vec: &SmallVec<A>) -> usize {
-    if vec.spilled() { vec.capacity() * size_of::<A::Item>() } else { 0 }
-}
-
-/// An empty `ThinVec` points at a shared static and owns nothing; a non-empty
-/// one owns a header plus its elements, and reports `capacity() == 0` when
-/// empty, so the multiplication covers both cases.
-fn thin_vec<T>(vec: &ThinVec<T>) -> usize {
-    vec.capacity() * size_of::<T>()
-}
-
-/// The allocation a `Box` makes for the value it points at, plus whatever that
-/// value owns in turn. Spelled out because it is easy to charge for the pointee
-/// and forget the box itself.
-fn boxed<T>(value: &Option<Box<T>>, owned: impl Fn(&T) -> usize) -> usize {
-    value.as_ref().map_or(0, |value| size_of::<T>() + owned(value))
 }
 
 // -------------------------------------------------------------------- stores

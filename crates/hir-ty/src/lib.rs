@@ -27,6 +27,7 @@ extern crate self as hir_ty;
 
 pub mod builtin_derive;
 mod generics;
+mod heap_size;
 mod infer;
 mod inhabitedness;
 mod lower;

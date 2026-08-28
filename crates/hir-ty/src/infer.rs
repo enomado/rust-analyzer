@@ -1093,7 +1093,12 @@ impl<'db> InferenceResult<'db> {
     //
     // `lru` composes with `cycle_result`; salsa only forbids combining it with
     // `specify` (salsa-macros/src/tracked_fn.rs:153).
-    #[salsa::tracked(returns(ref), lru = 2024, cycle_result = infer_cycle_result)]
+    #[salsa::tracked(
+        returns(ref),
+        lru = 2024,
+        cycle_result = infer_cycle_result,
+        heap_size = crate::heap_size::inference_result
+    )]
     fn for_body(db: &dyn HirDatabase, def: DefWithBodyId) -> InferenceResult<'_> {
         infer_query(db, def)
     }
@@ -1103,7 +1108,14 @@ impl<'db> InferenceResult<'db> {
     /// Returns an `InferenceResult` containing type information for array lengths,
     /// const generic arguments, and other const expressions appearing in type
     /// positions within the item's signature.
-    #[salsa::tracked(returns(ref), cycle_result = infer_anon_const_cycle_result)]
+    // Same value type, same arithmetic, separate memos — an anon const's result
+    // is built for that const alone, so counting both cannot double-charge one
+    // allocation. Left out, this query's bytes would simply be invisible.
+    #[salsa::tracked(
+        returns(ref),
+        cycle_result = infer_anon_const_cycle_result,
+        heap_size = crate::heap_size::inference_result
+    )]
     fn for_anon_const(db: &'db dyn HirDatabase, def: AnonConstId<'db>) -> InferenceResult<'db> {
         infer_anon_const_query(db, def)
     }
@@ -1123,6 +1135,72 @@ impl<'db> InferenceResult<'db> {
 }
 
 impl<'db> InferenceResult<'db> {
+    /// The heap this result owns, for the `heap_size` of
+    /// [`InferenceResult::for_body`]. What such a number counts and what it
+    /// deliberately leaves out is in [`crate::heap_size`].
+    ///
+    /// The exhaustive destructuring is load-bearing, not style: a field added
+    /// upstream stops this compiling instead of silently dropping out of the
+    /// total. A byte count that quietly goes stale across a rebase is worse
+    /// than none, because every answer it gives still looks plausible.
+    pub(crate) fn heap_size(&self) -> usize {
+        use hir_def::heap_size::{
+            arena_map, boxed, hash_map, hash_map_with, hash_set, slice, thin_vec, vec,
+        };
+
+        let Self {
+            method_resolutions,
+            field_resolutions,
+            variant_resolutions,
+            assoc_resolutions,
+            tuple_field_access_types,
+            type_of_expr,
+            type_of_pat,
+            type_of_binding,
+            type_of_type_placeholder,
+            type_of_opaque,
+            // A flag, and an interned handle to the error type. Every `Stored*`
+            // in the maps above is a salsa id into a table shared with every
+            // other body, so following one would charge one allocation to
+            // thousands of memos — the rule stated in `hir_def::heap_size`.
+            has_errors: _,
+            error_ty: _,
+            diagnostics,
+            nodes_with_type_mismatches,
+            expr_adjustments,
+            pat_adjustments,
+            binding_modes,
+            skipped_ref_pats,
+            coercion_casts,
+            closures_data,
+            defined_anon_consts,
+        } = self;
+
+        hash_map(method_resolutions)
+            + hash_map(field_resolutions)
+            + hash_map(variant_resolutions)
+            + hash_map(assoc_resolutions)
+            + thin_vec(tuple_field_access_types)
+            // The three dense ones: a type per expression, per pattern and per
+            // binding in the body. This is where the bulk of a big body goes.
+            + arena_map(type_of_expr)
+            + arena_map(type_of_pat)
+            + arena_map(type_of_binding)
+            + hash_map(type_of_type_placeholder)
+            + hash_map(type_of_opaque)
+            + thin_vec(diagnostics)
+            + boxed(nodes_with_type_mismatches, hash_set)
+            // The adjustment lists are the places where a *value* owns a buffer
+            // of its own instead of being a handle, so they are counted through.
+            + hash_map_with(expr_adjustments, |adjustments| slice(&adjustments[..]))
+            + hash_map_with(pat_adjustments, vec)
+            + arena_map(binding_modes)
+            + hash_set(skipped_ref_pats)
+            + hash_set(coercion_casts)
+            + hash_map_with(closures_data, crate::heap_size::closure_data)
+            + thin_vec(defined_anon_consts)
+    }
+
     fn new(error_ty: Ty<'_>) -> Self {
         Self {
             method_resolutions: Default::default(),

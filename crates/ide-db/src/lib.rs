@@ -233,21 +233,53 @@ impl RootDatabase {
     ///
     /// Note `capacity == 0` DISABLES eviction rather than emptying the cache;
     /// `1` is the smallest cache that still evicts.
-    fn set_query_lru_capacity(&mut self, query: &str, capacity: u16) {
-        if salsa::Database::set_lru_capacity_by_name(self, query, capacity as usize) == 0 {
-            tracing::warn!(
-                "no tracked query named `{query}` has a tunable LRU capacity; \
-                 the requested capacity {capacity} was not applied"
-            );
+    ///
+    /// Returns `false` when the name matched no tunable query, so a caller can
+    /// count the misses instead of hoping somebody reads the log.
+    #[must_use]
+    fn set_query_lru_capacity(&mut self, query: &str, capacity: u16) -> bool {
+        if salsa::Database::set_lru_capacity_by_name(self, query, capacity as usize) != 0 {
+            return true;
         }
+        // Second chance, and not a guess: for an *associated* tracked fn the
+        // salsa macro names the generated ingredient `<SelfTy>::<fn>_`, so the
+        // readable form a human writes in a config never matches on its own.
+        // Trying the suffixed form keeps `Body::with_source_map` usable in
+        // `rust-analyzer.lruQueryCapacities` without making the caller learn
+        // the macro's spelling.
+        if salsa::Database::set_lru_capacity_by_name(self, &format!("{query}_"), capacity as usize)
+            != 0
+        {
+            return true;
+        }
+        tracing::warn!(
+            "no tracked query named `{query}` has a tunable LRU capacity; \
+             the requested capacity {capacity} was not applied. Tunable names are: {:?}",
+            salsa::Database::lru_capacity_names(self)
+        );
+        false
     }
 
-    pub fn update_base_query_lru_capacities(&mut self, lru_capacity: Option<u16>) {
+    /// Returns how many of the capacities below could not be applied — `0` when
+    /// the whole set landed.
+    ///
+    /// The names are salsa `debug_name`s, taken from `lru_capacity_names()` and
+    /// not composed by hand: an associated query carries a trailing `_`, and a
+    /// self type carries its generics, spaces and all. Guessing them is exactly
+    /// how this knob came back looking alive while retuning nothing.
+    pub fn update_base_query_lru_capacities(&mut self, lru_capacity: Option<u16>) -> usize {
         let lru_capacity = lru_capacity.unwrap_or(base_db::DEFAULT_PARSE_LRU_CAP);
-        self.set_query_lru_capacity("EditionedFileId::parse", lru_capacity);
+        let mut missed = 0;
+        let mut apply = |db: &mut Self, query: &str, capacity: u16| {
+            if !db.set_query_lru_capacity(query, capacity) {
+                missed += 1;
+            }
+        };
+        apply(self, "EditionedFileId::parse_", lru_capacity);
         // macro expansions are usually rather small, so we can afford to keep more of them alive
-        self.set_query_lru_capacity(
-            "MacroCallId::parse_macro_expansion",
+        apply(
+            self,
+            "MacroCallId::parse_macro_expansion_",
             lru_capacity.saturating_mul(4),
         );
         // The fixed numbers below are the `lru = N` each query already carries in
@@ -256,27 +288,40 @@ impl RootDatabase {
         // tuning and not the pre-salsa-transition code that used to sit here —
         // that code asked for 2048 on the body/source-map query, upstream has
         // since settled on 512.
-        self.set_query_lru_capacity("HirFileId::ast_id_map", lru_capacity.saturating_mul(8));
-        self.set_query_lru_capacity("Body::with_source_map", 512);
+        apply(
+            self,
+            "HirFileId::ast_id_map_",
+            lru_capacity.saturating_mul(8),
+        );
+        apply(self, "Body::with_source_map_", 512);
         // Inference is the one query bur caps that upstream does not; see the
-        // `lru` attribute on `InferenceResult::for_body` in hir-ty for why.
-        self.set_query_lru_capacity(
-            "InferenceResult::for_body",
+        // `lru` attribute on `InferenceResult::for_body` in hir-ty for why. The
+        // lifetime in the rendered self type is part of the name.
+        apply(
+            self,
+            "InferenceResult < 'db >::for_body_",
             base_db::DEFAULT_BORROWCK_LRU_CAP,
         );
         // `file_text` is intentionally absent: it carries no `lru` attribute
         // upstream any more, so naming it here would only log a warning.
+        missed
     }
 
-    pub fn update_lru_capacities(&mut self, lru_capacities: &FxHashMap<Box<str>, u16>) {
+    /// Returns how many requested capacities could not be applied, counting both
+    /// the defaults and the caller's map — a typo in a user config is reportable,
+    /// not silent.
+    pub fn update_lru_capacities(&mut self, lru_capacities: &FxHashMap<Box<str>, u16>) -> usize {
         // Defaults first: a map that mentions one query must not leave the others
         // wherever an earlier call happened to put them.
-        self.update_base_query_lru_capacities(
+        let mut missed = self.update_base_query_lru_capacities(
             lru_capacities.get("EditionedFileId::parse").copied(),
         );
         for (query, capacity) in lru_capacities {
-            self.set_query_lru_capacity(query, *capacity);
+            if !self.set_query_lru_capacity(query, *capacity) {
+                missed += 1;
+            }
         }
+        missed
     }
 }
 

@@ -1,5 +1,5 @@
 <!---
-lsp/ext.rs hash: 98191ad3d886c851
+lsp/ext.rs hash: 92e17aaac1a067e5
 
 If you need to change the above hash to make the test pass, please check if you
 need to adjust this doc as well and ping this issue:
@@ -953,6 +953,33 @@ export interface MoveItemParams {
 export const enum Direction {
     Up = "Up",
     Down = "Down"
+}
+```
+
+## Move Item To Module
+
+**Upstream Issue:** <https://github.com/rust-lang/rust-analyzer/issues/8872>
+
+This request is sent from client to server to relocate an item into another module,
+fixing up the references to it across the workspace.
+
+Both ends are named by absolute path, as they would be written in source: unlike
+`textDocument/willRenameFiles`, which a file drag names by URI, no editor gesture
+points at an item and at the module it should land in.
+
+**Method:** `experimental/moveItemToModule`
+
+**Request:** `MoveItemToModuleParams`
+
+**Response:** `WorkspaceEdit | null`
+
+```typescript
+export interface MoveItemToModuleParams {
+    /// The item to move, e.g. `my_crate::a::foo`.
+    item: string,
+    /// The module to move it into, e.g. `my_crate::b`; the crate name alone
+    /// names the crate root.
+    destination: string
 }
 ```
 

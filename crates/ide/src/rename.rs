@@ -1371,6 +1371,54 @@ pub fn after() {}
     }
 
     #[test]
+    fn move_item_widens_past_doc_comments_and_attributes() {
+        // Widening inserts a visibility, and what is written *about* an item
+        // comes first: `pub(crate)` has to land next to `fn`, since
+        // `pub(crate) /// Does the thing.` is not a parse. Both widenings are
+        // exercised at once — the moved item, which loses the neighbour that
+        // called it, and the private neighbour its own body calls. Both kinds
+        // of comment are in the way, since only one of them is trivia.
+        check_move_item(
+            "ra_test_fixture::a::foo",
+            "ra_test_fixture::b",
+            r#"
+//- /lib.rs
+mod a;
+mod b;
+//- /a.rs
+/// Helps.
+#[inline]
+fn helper() {}
+
+// Called from next door, which is about to stop being next door.
+/// Does the thing.
+#[inline]
+fn foo() { helper(); }
+
+fn caller() { foo(); }
+//- /b.rs
+"#,
+            expect![[r#"
+                //- FileId(1)
+                use crate::b::foo;
+
+                /// Helps.
+                #[inline]
+                pub(crate) fn helper() {}
+
+                fn caller() { foo(); }
+
+                //- FileId(2)
+                // Called from next door, which is about to stop being next door.
+                /// Does the thing.
+                #[inline]
+                pub(crate) fn foo() { crate::a::helper(); }
+
+            "#]],
+        );
+    }
+
+    #[test]
     fn move_item_rejects_what_text_alone_does_not_carry() {
         check_move_item(
             "ra_test_fixture::a::m",

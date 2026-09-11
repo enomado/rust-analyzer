@@ -766,11 +766,18 @@ fn widen_to_pub_crate(node: &SyntaxNode, editor: &SyntaxEditor) {
     match existing {
         Some(old) => editor.replace(old.syntax(), vis.syntax()),
         None => {
-            // Attributes and doc comments come first and stay first.
+            // Attributes and doc comments come first and stay first. A doc
+            // comment is its own node rather than `COMMENT` trivia, and is not
+            // reported by `SyntaxKind::is_trivia` either, so it has to be named
+            // here — miss it and the visibility anchors on the doc comment,
+            // which spells `pub(crate) /// …` and no longer parses.
             if let Some(anchor) = node.children_with_tokens().find(|it| {
                 !matches!(
                     it.kind(),
-                    SyntaxKind::WHITESPACE | SyntaxKind::COMMENT | SyntaxKind::ATTR
+                    SyntaxKind::WHITESPACE
+                        | SyntaxKind::COMMENT
+                        | SyntaxKind::DOC_COMMENT
+                        | SyntaxKind::ATTR
                 )
             }) {
                 editor.insert_all(

@@ -1447,6 +1447,43 @@ fn f() -> main::S { main::S }
     }
 
     #[test]
+    fn move_item_across_crates_reaches_an_associated_fn_through_its_type() {
+        // Found moving a calibration type down a crate (lathe, crates
+        // structure Ф2): its body built `ScrewDelta::new(..)` from a units
+        // crate both ends depend on, and the move was refused as "not
+        // reachable". `find_path` never names an associated item — it is
+        // reached through its type, and the type was reachable all along.
+        check_move_item(
+            "main::a::S",
+            "hw::m",
+            r#"
+//- /main.rs crate:main deps:hw,units
+pub mod a;
+//- /a.rs
+use units::*;
+pub struct S(pub D);
+impl S { pub fn of(n: i64) -> S { S(D::new(n)) } }
+//- /hw/lib.rs crate:hw deps:units
+pub mod m;
+//- /hw/m.rs
+//- /units/lib.rs crate:units
+pub struct D(i64);
+impl D { pub fn new(n: i64) -> D { D(n) } }
+"#,
+            expect![[r#"
+                //- FileId(1)
+                use units::*;
+
+                //- FileId(3)
+                pub struct S(pub units::D);
+
+                impl S { pub fn of(n: i64) -> S { S(units::D::new(n)) } }
+
+            "#]],
+        );
+    }
+
+    #[test]
     fn move_item_carries_its_comments_and_attributes() {
         // What is written *about* an item is part of it: a doc comment, a plain
         // comment sitting on top of it, and its attributes all travel along.

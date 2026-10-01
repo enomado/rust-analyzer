@@ -29,8 +29,8 @@ use crate::{
 use base_db::AnchoredPathBuf;
 use either::Either;
 use hir::{
-    EditionedFileId, FieldSource, FileRange, FindPathConfig, HasCrate, HasSource, HirFileId,
-    InFile, ModPath, ModuleSource, Name, PathKind, Semantics, sym,
+    AsAssocItem, EditionedFileId, FieldSource, FileRange, FindPathConfig, HasCrate, HasSource,
+    HirFileId, InFile, ModPath, ModuleSource, Name, PathKind, Semantics, sym,
 };
 use itertools::Itertools;
 use rustc_hash::FxHashSet;
@@ -835,6 +835,18 @@ impl ItemMove<'_> {
                 continue;
             }
             let Some(hir::PathResolution::Def(target)) = sema.resolve_path(&path) else { continue };
+            // `Type::assoc` resolves to the associated item, and `find_path`
+            // never names one: it is reached through its type (or trait). So
+            // the qualifier is what has to be reachable — and what gets
+            // respelled. A qualifier that is no item (`Self::new`, `T::new`)
+            // means what it meant wherever the item lands.
+            let (path, target) = match (target.as_assoc_item(db), path.qualifier()) {
+                (Some(_), Some(qualifier)) => match sema.resolve_path(&qualifier) {
+                    Some(hir::PathResolution::Def(owner)) => (qualifier, owner),
+                    _ => continue,
+                },
+                _ => (path, target),
+            };
             if self.dst.find_path(db, target, MOVE_FIND_PATH).is_some() {
                 continue;
             }

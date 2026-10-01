@@ -895,6 +895,89 @@ impl ItemMove<'_> {
         Ok(respelled)
     }
 
+    /// A macro's arguments are a token tree, not paths: neither
+    /// [`PathTransform`] nor [`Self::respell_unreachable_paths`] sees a name used
+    /// inside `assert!(…)`, and it would travel bare into a file where nothing
+    /// brings it into scope. So each identifier that starts a path in the
+    /// expansion is respelled the way the destination reaches what it names.
+    ///
+    /// Only the first segment is looked at: the rest of the path is reached
+    /// through it, exactly as [`PathTransform`] rewrites only an unqualified
+    /// path. `node` comes back as is when nothing needs respelling, so that a
+    /// macro-free item keeps being transformed in its own tree.
+    fn respell_macro_arguments(
+        &self,
+        sema: &Semantics<'_, RootDatabase>,
+        node: &SyntaxNode,
+    ) -> Result<SyntaxNode> {
+        let db = sema.db;
+        let edition = self.src_file.edition(db);
+        let idents = node.descendants_with_tokens().filter_map(|it| it.into_token()).filter(|it| {
+            it.kind() == SyntaxKind::IDENT
+                && it.parent().is_some_and(|parent| ast::TokenTree::can_cast(parent.kind()))
+        });
+        let mut spelled: Vec<(TextRange, ModPath)> = Vec::new();
+        for token in idents {
+            // A token the expansion does not use as a path — a field, a format
+            // string's neighbour, a macro's own keyword — descends to no
+            // `PathSegment` and is left alone.
+            let target = sema.descend_into_macros_exact(token.clone()).into_iter().find_map(|it| {
+                let segment = it.parent().and_then(ast::NameRef::cast)?.syntax().parent();
+                let path = segment.and_then(ast::PathSegment::cast)?.parent_path();
+                if path.qualifier().is_some() {
+                    return None;
+                }
+                match sema.resolve_path(&path)? {
+                    hir::PathResolution::Def(def) => Some(def),
+                    _ => None,
+                }
+            });
+            let Some(target) = target else { continue };
+            // Its own name is what the item is called where it lands.
+            if target == self.def {
+                continue;
+            }
+            let Some(found) = self.dst.find_path(db, target, MOVE_FIND_PATH) else {
+                // An item nested inside what moves travels with it.
+                if let Ok((target_file, target_item)) = item_syntax(sema, target)
+                    && self.carries(db, target_file.file_id(db), target_item.syntax().text_range())
+                {
+                    continue;
+                }
+                // `respell_unreachable_paths` widens what a real path names; a
+                // token it never saw cannot be widened after the fact.
+                bail!(
+                    "`{}` inside a macro call is not reachable from the destination",
+                    token.text()
+                );
+            };
+            if found.as_ident().is_some_and(|it| it.as_str() == token.text()) {
+                continue;
+            }
+            spelled.push((token.text_range() - node.text_range().start(), found));
+        }
+        if spelled.is_empty() {
+            return Ok(node.clone());
+        }
+
+        let (editor, root) = SyntaxEditor::new(node.clone());
+        for (range, path) in spelled {
+            let Some(old) = root.covering_element(range).into_token() else {
+                never!("a macro argument token is no longer a token in the copy");
+                continue;
+            };
+            let path = mod_path_to_ast_with_factory(editor.make(), &path, edition);
+            let tokens = path
+                .syntax()
+                .descendants_with_tokens()
+                .filter_map(|it| it.into_token())
+                .map(SyntaxElement::Token)
+                .collect();
+            editor.replace_with_many(old, tokens);
+        }
+        Ok(editor.finish().new_root().clone())
+    }
+
     /// `node` — the item, or an impl it carries — as it must read at the
     /// destination: paths re-resolved from there, the item's own name
     /// un-stale-d, visibility widened to `reach`, and the members listed in
@@ -913,6 +996,7 @@ impl ItemMove<'_> {
         let source_scope = sema.scope(node).ok_or_else(|| format_err!("item has no scope"))?;
         let target_scope =
             sema.scope(dst_node).ok_or_else(|| format_err!("destination has no scope"))?;
+        let node = &self.respell_macro_arguments(sema, node)?;
         let transformed =
             PathTransform::generic_transformation(&target_scope, &source_scope).apply(node);
 

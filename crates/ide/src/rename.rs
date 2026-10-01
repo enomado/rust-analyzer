@@ -1484,6 +1484,80 @@ impl D { pub fn new(n: i64) -> D { D(n) } }
     }
 
     #[test]
+    fn move_item_across_crates_respells_a_name_inside_a_macro_call() {
+        // Found moving the same calibration type (lathe, crates structure Ф2):
+        // its body asserted `n <= ENCODER_PR_MAX`, and the move carried the
+        // bare name into a file where nothing imported it. The same name
+        // outside a macro was respelled: a macro's arguments are a token tree,
+        // and no path in it is visible to the passes that rewrite paths.
+        check_move_item(
+            "main::a::S",
+            "hw::m",
+            r#"
+//- minicore: assert
+//- /main.rs crate:main deps:hw,units
+pub mod a;
+//- /a.rs
+use units::turn::MAX;
+pub struct S(pub u32);
+impl S { pub fn of(n: u32) -> S { assert!(n <= MAX); S(n) } }
+//- /hw/lib.rs crate:hw deps:units
+pub mod m;
+//- /hw/m.rs
+//- /units/lib.rs crate:units
+pub mod turn;
+//- /units/turn.rs
+pub const MAX: u32 = 7;
+"#,
+            expect![[r#"
+                //- FileId(1)
+                use units::turn::MAX;
+
+                //- FileId(3)
+                pub struct S(pub u32);
+
+                impl S { pub fn of(n: u32) -> S { assert!(n <= units::turn::MAX); S(n) } }
+
+            "#]],
+        );
+    }
+
+    #[test]
+    fn move_item_across_crates_respells_a_name_imported_by_a_single_use() {
+        // The control for the macro case above: outside a macro the same
+        // single `use` was never the problem.
+        check_move_item(
+            "main::a::S",
+            "hw::m",
+            r#"
+//- /main.rs crate:main deps:hw,units
+pub mod a;
+//- /a.rs
+use units::turn::MAX;
+pub struct S(pub u32);
+impl S { pub fn of(n: u32) -> S { let ok = n <= MAX; S(n) } }
+//- /hw/lib.rs crate:hw deps:units
+pub mod m;
+//- /hw/m.rs
+//- /units/lib.rs crate:units
+pub mod turn;
+//- /units/turn.rs
+pub const MAX: u32 = 7;
+"#,
+            expect![[r#"
+                //- FileId(1)
+                use units::turn::MAX;
+
+                //- FileId(3)
+                pub struct S(pub u32);
+
+                impl S { pub fn of(n: u32) -> S { let ok = n <= units::turn::MAX; S(n) } }
+
+            "#]],
+        );
+    }
+
+    #[test]
     fn move_item_carries_its_comments_and_attributes() {
         // What is written *about* an item is part of it: a doc comment, a plain
         // comment sitting on top of it, and its attributes all travel along.

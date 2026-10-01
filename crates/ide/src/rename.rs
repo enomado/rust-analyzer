@@ -1337,6 +1337,116 @@ impl S { pub fn new() -> S { S } }
     }
 
     #[test]
+    fn move_item_across_crates_carries_the_impls_it_cannot_leave() {
+        // Found moving a type out of firmware into its HAL crate (lathe, Ф8):
+        // the type went alone, its inherent impl stayed behind as E0116, and the
+        // file it left imported it back as `crate::…` — a path from the crate
+        // it was no longer in.
+        //
+        // Across crates an inherent impl, and an impl of a trait foreign to the
+        // old crate, can only live with the type; an impl of the old crate's own
+        // trait stays and is valid there. What the old crate still uses from the
+        // type becomes `pub`; what only the travelling impls use keeps its
+        // visibility.
+        check_move_item(
+            "main::hardware::Enc",
+            "hw::input",
+            r#"
+//- /main.rs crate:main deps:hw
+mod hardware;
+pub trait Local { fn l(&self); }
+fn run() { let e = hardware::Enc::new(); e.poll(); }
+//- /hardware.rs
+pub struct Enc { pub(crate) count: u32, raw: u8 }
+
+impl Enc {
+    pub(crate) fn new() -> Enc { Enc { count: 0, raw: 0 } }
+    pub fn poll(&self) -> u32 { self.helper(); self.count }
+    fn helper(&self) {}
+}
+
+impl hw::Tick for Enc { fn tick(&mut self) { self.raw += 1; } }
+
+impl crate::Local for Enc { fn l(&self) {} }
+
+pub fn make() -> Enc { Enc::new() }
+//- /hw/lib.rs crate:hw
+pub mod input;
+pub trait Tick { fn tick(&mut self); }
+//- /hw/input.rs
+"#,
+            expect![[r#"
+                //- FileId(0)
+                mod hardware;
+                pub trait Local { fn l(&self); }
+                fn run() { let e = hw::input::Enc::new(); e.poll(); }
+
+                //- FileId(1)
+                use hw::input::Enc;
+
+                impl crate::Local for Enc { fn l(&self) {} }
+
+                pub fn make() -> Enc { Enc::new() }
+
+                //- FileId(3)
+                pub struct Enc { pub(crate) count: u32, raw: u8 }
+
+                impl Enc {
+                    pub fn new() -> Enc { Enc { count: 0, raw: 0 } }
+                    pub fn poll(&self) -> u32 { self.helper(); self.count }
+                    fn helper(&self) {}
+                }
+
+                impl crate::Tick for Enc { fn tick(&mut self) { self.raw += 1; } }
+
+            "#]],
+        );
+    }
+
+    #[test]
+    fn move_item_across_crates_refuses_a_private_destination() {
+        // The crate the item leaves still uses it, and would have to name it
+        // through a module it cannot see.
+        check_move_item(
+            "main::a::S",
+            "hw::hidden",
+            r#"
+//- /main.rs crate:main deps:hw
+mod a;
+fn f() -> a::S { a::S }
+//- /a.rs
+pub struct S;
+//- /hw/lib.rs crate:hw
+mod hidden;
+//- /hw/hidden.rs
+"#,
+            expect![
+                "error: Module `hidden` is not `pub`, and the moved item is still used from another crate"
+            ],
+        );
+    }
+
+    #[test]
+    fn move_item_across_crates_refuses_a_crate_that_cannot_follow() {
+        // `other` reaches the item through `main`, and does not depend on the
+        // crate it would move to: no path it could write reaches it there.
+        check_move_item(
+            "main::S",
+            "hw",
+            r#"
+//- /main.rs crate:main deps:hw
+pub struct S;
+//- /hw/lib.rs crate:hw
+//- /other.rs crate:other deps:main
+fn f() -> main::S { main::S }
+"#,
+            expect![
+                "error: Crate `other` refers to the item but does not depend on `hw`, where it would move"
+            ],
+        );
+    }
+
+    #[test]
     fn move_item_carries_its_comments_and_attributes() {
         // What is written *about* an item is part of it: a doc comment, a plain
         // comment sitting on top of it, and its attributes all travel along.

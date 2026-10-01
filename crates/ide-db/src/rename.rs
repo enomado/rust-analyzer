@@ -421,7 +421,7 @@ pub fn move_mod(
     let usages = def.usages(sema).all();
     for (file_id, references) in usages.iter() {
         let edition = file_id.edition(db);
-        let prefix = crate_root_prefix_for(sema, file_id.file_id(db), moved_crate, db);
+        let prefix = crate_root_prefix_for(sema, file_id.file_id(db), moved_crate, db)?;
         let source_file = sema.parse(file_id);
         let editor = builder.make_editor(source_file.syntax());
         rewrite_references_for_move(references, &new_segs, prefix.as_ref(), &editor, db, edition);
@@ -494,30 +494,172 @@ pub fn move_item(
     let mut new_segs: Vec<Name> = dst.path_segments(db).collect();
     new_segs.push(name);
 
-    let mov = ItemMove { def, item: &item, src_file, dst, new_segs, krate: src_module.krate(db) };
+    let src_krate = src_module.krate(db);
+    let dst_krate = dst.krate(db);
+    let carried = carried_impls(sema, def, src_krate, dst_krate, src_file, &item)?;
+    let mov = ItemMove { def, item: &item, src_file, dst, new_segs, dst_krate, carried };
     let mut builder = SourceChangeBuilder::new(src_file_id);
 
-    let widen = mov.rewrite_outside_references(sema, insert_use_cfg, &mut builder);
+    let reach = mov.rewrite_outside_references(sema, insert_use_cfg, &mut builder)?;
+    if reach == Reach::Public {
+        mov.check_destination_is_public(db)?;
+    }
     let respelled = mov.respell_unreachable_paths(sema, &mut builder)?;
-    let relocated = mov.relocated(sema, &dst_node, &respelled, widen)?;
+    let cross_crate = src_krate != dst_krate;
 
-    let src_editor = builder.make_editor(item.syntax());
-    remove_item_taking_line(item.syntax(), &src_editor);
-    builder.add_file_edits(src_file_id, src_editor);
+    // The item first, then whatever impls it carries, each removed from where it
+    // was and rendered as it must read at the destination.
+    let mut moved: Vec<(EditionedFileId, SyntaxNode, SyntaxNode)> = Vec::new();
+    let item_members =
+        if cross_crate { mov.members_used_elsewhere(sema, item.syntax()) } else { Vec::new() };
+    let relocated =
+        mov.relocated(sema, &dst_node, item.syntax(), &respelled, reach, &item_members)?;
+    moved.push((src_file, item.syntax().clone(), relocated));
+    for (file, imp) in &mov.carried {
+        let members = mov.members_used_elsewhere(sema, imp.syntax());
+        let relocated =
+            mov.relocated(sema, &dst_node, imp.syntax(), &respelled, Reach::Module, &members)?;
+        moved.push((*file, imp.syntax().clone(), relocated));
+    }
 
     let dst_editor = builder.make_editor(&dst_node);
     // A file that has items gets a blank line between them; an empty one would
     // otherwise open with a blank line of its own.
     let mut elements: Vec<SyntaxElement> = Vec::new();
-    if dst_node.children().next().is_some() {
-        elements.push(dst_editor.make().whitespace("\n\n").into());
+    let mut taken = Vec::new();
+    for (i, (file, original, relocated)) in moved.into_iter().enumerate() {
+        let src_editor = builder.make_editor(&original);
+        remove_item_taking_line(&original, &src_editor, &mut taken, file.file_id(db));
+        builder.add_file_edits(file.file_id(db), src_editor);
+
+        if i > 0 || dst_node.children().next().is_some() {
+            elements.push(dst_editor.make().whitespace("\n\n").into());
+        }
+        elements.push(relocated.into());
     }
-    elements.push(relocated.into());
     elements.push(dst_editor.make().whitespace("\n").into());
     dst_editor.insert_all(Position::last_child_of(&dst_node), elements);
     builder.add_file_edits(dst_file_id, dst_editor);
 
     Ok(builder.finish())
+}
+
+/// How far a moved item — or one of its members — has to be seen from, once it
+/// no longer sits where its users found it. Ordered: each reaches further.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Reach {
+    /// Only from inside the destination: whatever it declares is enough.
+    Module,
+    /// From elsewhere in the destination's crate: at least `pub(crate)`.
+    Crate,
+    /// From another crate — the one it came from, typically: `pub`.
+    Public,
+}
+
+/// The impl blocks a type has to take along when it changes crates.
+///
+/// Within a crate an inherent impl is valid from any module, so it stays where
+/// it is (see the tests). Across crates it is not: an inherent impl of a
+/// foreign type is E0116, and an impl of a foreign trait for a foreign type is
+/// E0117 — which is what every impl of the type in the old crate becomes,
+/// except one of a trait that crate itself declares. Those stay; all the others
+/// travel with the type, since nothing else can hold them.
+///
+/// Derived impls expand from the type's own attribute, and so travel with it
+/// already; an impl some other macro generates cannot be carried as text, and
+/// is refused rather than left behind to fail.
+fn carried_impls(
+    sema: &Semantics<'_, RootDatabase>,
+    def: hir::ModuleDef,
+    src_krate: hir::Crate,
+    dst_krate: hir::Crate,
+    item_file: EditionedFileId,
+    item: &ast::Item,
+) -> Result<Vec<(EditionedFileId, ast::Impl)>> {
+    let db = sema.db;
+    if src_krate == dst_krate {
+        return Ok(Vec::new());
+    }
+    let hir::ModuleDef::Adt(adt) = def else { return Ok(Vec::new()) };
+    let mut carried = Vec::new();
+    for imp in hir::Impl::all_for_type(db, adt.ty(db)) {
+        if imp.module(db).krate(db) != src_krate {
+            continue;
+        }
+        if imp.trait_(db).is_some_and(|it| it.krate(db) == src_krate) {
+            continue;
+        }
+        // A builtin derive has no source at all — it is the attribute.
+        let Some(src) = imp.source(db) else { continue };
+        let file = match src.file_id {
+            HirFileId::FileId(it) => it,
+            HirFileId::MacroFile(_) => {
+                let call = src.syntax().original_file_range_rooted(db);
+                if call.file_id == item_file
+                    && item.syntax().text_range().contains_range(call.range)
+                {
+                    continue;
+                }
+                bail!(
+                    "An impl of `{}` is generated by a macro, and cannot follow it into another crate",
+                    adt.name(db).display(db, item_file.edition(db))
+                );
+            }
+        };
+        let node = find_node_at_range::<ast::Impl>(
+            sema.parse(file).syntax(),
+            src.value.syntax().text_range(),
+        )
+        .ok_or_else(|| format_err!("impl not found in its own file"))?;
+        carried.push((file, node));
+    }
+    // Source order, so the destination reads as the source did.
+    carried.sort_by_key(|(file, imp)| (file.file_id(db), imp.syntax().text_range().start()));
+    Ok(carried)
+}
+
+/// Fields of a struct or union, or items of an inherent impl, in source order —
+/// what has a visibility of its own inside an item that has moved.
+fn members_of(node: &SyntaxNode) -> Vec<SyntaxNode> {
+    if let Some(imp) = ast::Impl::cast(node.clone()) {
+        // A trait impl's items take the trait's visibility, and have none to widen.
+        if imp.trait_().is_some() {
+            return Vec::new();
+        }
+        return imp
+            .assoc_item_list()
+            .map(|it| it.assoc_items().map(|it| it.syntax().clone()).collect())
+            .unwrap_or_default();
+    }
+    if let Some(list) = node.children().find_map(ast::RecordFieldList::cast) {
+        return list.fields().map(|it| it.syntax().clone()).collect();
+    }
+    if let Some(list) = node.children().find_map(ast::TupleFieldList::cast) {
+        return list.fields().map(|it| it.syntax().clone()).collect();
+    }
+    Vec::new()
+}
+
+fn member_def<'db>(
+    sema: &Semantics<'db, RootDatabase>,
+    node: &SyntaxNode,
+) -> Option<Definition<'db>> {
+    if let Some(it) = ast::RecordField::cast(node.clone()) {
+        return sema.to_def(&it).map(Definition::Field);
+    }
+    if let Some(it) = ast::TupleField::cast(node.clone()) {
+        return sema.to_def(&it).map(Definition::Field);
+    }
+    if let Some(it) = ast::Fn::cast(node.clone()) {
+        return sema.to_def(&it).map(Definition::Function);
+    }
+    if let Some(it) = ast::Const::cast(node.clone()) {
+        return sema.to_def(&it).map(Definition::Const);
+    }
+    if let Some(it) = ast::TypeAlias::cast(node.clone()) {
+        return sema.to_def(&it).map(Definition::TypeAlias);
+    }
+    None
 }
 
 /// One [`move_item`] in progress: what is being torn out, and where it lands.
@@ -528,47 +670,110 @@ struct ItemMove<'a> {
     dst: hir::Module,
     /// Path to the item once moved, ending in its own name.
     new_segs: Vec<Name>,
-    krate: hir::Crate,
+    /// The crate the item lands in — which is the one its path now starts
+    /// from, and so the one every reference has to be spelled against.
+    dst_krate: hir::Crate,
+    /// Impl blocks that travel with the item: see [`carried_impls`].
+    carried: Vec<(EditionedFileId, ast::Impl)>,
 }
 
 impl ItemMove<'_> {
+    /// Whether `range` of `file` travels with the move — the item itself, or
+    /// one of the impls it carries.
+    fn carries(&self, db: &RootDatabase, file: FileId, range: TextRange) -> bool {
+        (file == self.src_file.file_id(db) && self.item.syntax().text_range().contains_range(range))
+            || self.carried.iter().any(|(it, imp)| {
+                it.file_id(db) == file && imp.syntax().text_range().contains_range(range)
+            })
+    }
+
+    /// Indices, as [`members_of`] lists them, of the members of `node` still
+    /// used from another crate than the destination's — the crate the item
+    /// left, typically — and so needing `pub` there. Uses inside what moves
+    /// travel along and do not count.
+    fn members_used_elsewhere(
+        &self,
+        sema: &Semantics<'_, RootDatabase>,
+        node: &SyntaxNode,
+    ) -> Vec<usize> {
+        let db = sema.db;
+        members_of(node)
+            .iter()
+            .enumerate()
+            .filter(|(_, member)| {
+                let Some(def) = member_def(sema, member) else { return false };
+                def.usages(sema).all().iter().any(|(file, refs)| {
+                    let file_id = file.file_id(db);
+                    sema.file_to_module_def(file_id)
+                        .is_some_and(|it| it.krate(db) != self.dst_krate)
+                        && refs.iter().any(|it| !self.carries(db, file_id, it.range))
+                })
+            })
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    /// Another crate can only name the item if every module on the way to it
+    /// is `pub`. Nothing here decides the visibility of a module, so a private
+    /// one on the way is refused instead of producing unreachable references.
+    fn check_destination_is_public(&self, db: &RootDatabase) -> Result<()> {
+        for module in self.dst.path_to_root(db) {
+            if module.is_crate_root(db) {
+                continue;
+            }
+            if hir::HasVisibility::visibility(&module, db) != hir::Visibility::Public {
+                let edition = self.src_file.edition(db);
+                bail!(
+                    "Module `{}` is not `pub`, and the moved item is still used from another crate",
+                    module
+                        .path_segments(db)
+                        .map(|it| it.display(db, edition).to_string())
+                        .join("::")
+                );
+            }
+        }
+        Ok(())
+    }
+
     /// Rewrites every reference that stays behind, importing the item into the
-    /// files that reached it by proximity. Returns whether any reference sits
-    /// outside the destination subtree, i.e. whether the item has to be widened.
+    /// files that reached it by proximity. Returns how far away the furthest
+    /// reference sits, i.e. how much the item has to be widened.
     fn rewrite_outside_references(
         &self,
         sema: &Semantics<'_, RootDatabase>,
         insert_use_cfg: &InsertUseConfig,
         builder: &mut SourceChangeBuilder,
-    ) -> bool {
+    ) -> Result<Reach> {
         let db = sema.db;
-        let src_file_id = self.src_file.file_id(db);
-        let item_range = self.item.syntax().text_range();
 
         // Files whose bare references stop resolving once the item is no longer a
         // neighbour, paired with the path they have to import it by.
         let mut needs_import: Vec<(EditionedFileId, ModPath)> = Vec::new();
-        let mut referred_from_outside_dst = false;
+        let mut reach = Reach::Module;
 
         for (ref_file, references) in Definition::from(self.def).usages(sema).all().iter() {
             let ref_file_id = ref_file.file_id(db);
-            // References inside the item travel with it, and rewriting them here
-            // would edit a range this pass is about to delete.
+            // References inside what moves travel with it, and rewriting them
+            // here would edit a range this pass is about to delete.
             let references: Vec<FileReference> = references
                 .iter()
-                .filter(|it| !(ref_file_id == src_file_id && item_range.contains_range(it.range)))
+                .filter(|it| !self.carries(db, ref_file_id, it.range))
                 .cloned()
                 .collect();
             if references.is_empty() {
                 continue;
             }
 
-            let prefix = crate_root_prefix_for(sema, ref_file_id, self.krate, db);
+            let prefix = crate_root_prefix_for(sema, ref_file_id, self.dst_krate, db)?;
             let inside_dst = sema.file_to_module_def(ref_file_id).is_some_and(|it| {
                 it == self.dst || it.path_to_root(db).into_iter().any(|m| m == self.dst)
             });
+            if prefix.is_some() {
+                reach = Reach::Public;
+            } else if !inside_dst {
+                reach = reach.max(Reach::Crate);
+            }
             if !inside_dst {
-                referred_from_outside_dst = true;
                 // A bare reference alongside a `use` of the item keeps working: that
                 // `use` is a reference too, and is rewritten below. One *without* is
                 // either a neighbour's call or a glob import, and needs a `use` of
@@ -605,7 +810,7 @@ impl ItemMove<'_> {
             builder.add_file_edits(ref_file.file_id(db), editor);
         }
 
-        referred_from_outside_dst
+        Ok(reach)
     }
 
     /// Widens the private neighbours the body calls, and returns how each of
@@ -620,10 +825,11 @@ impl ItemMove<'_> {
         builder: &mut SourceChangeBuilder,
     ) -> Result<Vec<(Vec<String>, ModPath)>> {
         let db = sema.db;
-        let item_range = self.item.syntax().text_range();
         let mut respelled: Vec<(Vec<String>, ModPath)> = Vec::new();
 
-        for path in self.item.syntax().descendants().filter_map(ast::Path::cast) {
+        let moving = std::iter::once(self.item.syntax())
+            .chain(self.carried.iter().map(|(_, imp)| imp.syntax()));
+        for path in moving.flat_map(|it| it.descendants()).filter_map(ast::Path::cast) {
             // Qualifiers are rewritten as part of the whole path they belong to.
             if path.syntax().parent().and_then(ast::Path::cast).is_some() {
                 continue;
@@ -632,16 +838,32 @@ impl ItemMove<'_> {
             if self.dst.find_path(db, target, MOVE_FIND_PATH).is_some() {
                 continue;
             }
+            // The item named by a path into the crate it is leaving — say, an
+            // impl it carries reads `impl crate::a::S`. Where it lands, its
+            // name alone is the path. (Within one crate the destination can
+            // still reach the old path, and `stale_self_path` takes care.)
+            if target == self.def {
+                if path.qualifier().is_some()
+                    && let Some(segments) = path_segment_texts(&path)
+                {
+                    let leaf =
+                        self.new_segs.last().expect("path to the moved item ends in its name");
+                    respelled
+                        .push((segments, ModPath::from_segments(PathKind::Plain, [leaf.clone()])));
+                }
+                continue;
+            }
             let Ok((target_file, target_item)) = item_syntax(sema, target) else { continue };
-            // An item nested inside the one being moved travels with it, so its
-            // bare name keeps meaning what it meant.
-            if target_file == self.src_file
-                && item_range.contains_range(target_item.syntax().text_range())
-            {
+            // An item nested inside what moves travels with it, so its bare name
+            // keeps meaning what it meant.
+            if self.carries(db, target_file.file_id(db), target_item.syntax().text_range()) {
                 continue;
             }
             let Some(target_module) = target.module(db) else { continue };
-            if target_module.krate(db) != self.krate {
+            // Unreachable, and the destination's crate cannot be made to reach it
+            // by widening: a crate depends on the destination's, not the other
+            // way round — and it is not ours to add a dependency.
+            if target_module.krate(db) != self.dst_krate {
                 bail!(
                     "`{}` is not reachable from the destination and lives in another crate",
                     path.syntax().text()
@@ -661,23 +883,26 @@ impl ItemMove<'_> {
         Ok(respelled)
     }
 
-    /// The item as it must read at the destination: paths re-resolved from there,
-    /// its own name un-stale-d, visibility widened if it lost its neighbours.
+    /// `node` — the item, or an impl it carries — as it must read at the
+    /// destination: paths re-resolved from there, the item's own name
+    /// un-stale-d, visibility widened to `reach`, and the members listed in
+    /// `public_members` (indices as [`members_of`] gives them) made `pub`.
     fn relocated(
         &self,
         sema: &Semantics<'_, RootDatabase>,
         dst_node: &SyntaxNode,
+        node: &SyntaxNode,
         respelled: &[(Vec<String>, ModPath)],
-        widen: bool,
+        reach: Reach,
+        public_members: &[usize],
     ) -> Result<SyntaxNode> {
         let db = sema.db;
         let edition = self.src_file.edition(db);
-        let source_scope =
-            sema.scope(self.item.syntax()).ok_or_else(|| format_err!("item has no scope"))?;
+        let source_scope = sema.scope(node).ok_or_else(|| format_err!("item has no scope"))?;
         let target_scope =
             sema.scope(dst_node).ok_or_else(|| format_err!("destination has no scope"))?;
-        let transformed = PathTransform::generic_transformation(&target_scope, &source_scope)
-            .apply(self.item.syntax());
+        let transformed =
+            PathTransform::generic_transformation(&target_scope, &source_scope).apply(node);
 
         // `new` may hand back a detached copy, so every node below has to come
         // from the root it returns — the original would belong to another tree.
@@ -703,9 +928,14 @@ impl ItemMove<'_> {
                 editor.replace(path.syntax(), spelled.syntax());
             }
         }
-        if widen {
-            widen_to_pub_crate(&root, &editor);
+        // The copy has the members the original had, in the same order: the
+        // pass above rewrites paths, it neither adds nor drops a field or an
+        // associated item. So an index taken on the original finds its member.
+        let members = members_of(&root);
+        for &i in public_members {
+            widen_visibility(&members[i], &editor, Reach::Public);
         }
+        widen_visibility(&root, &editor, reach);
         Ok(editor.finish().new_root().clone())
     }
 }
@@ -757,12 +987,26 @@ fn item_syntax(
 
 /// Gives `node` at least crate-wide visibility.
 fn widen_to_pub_crate(node: &SyntaxNode, editor: &SyntaxEditor) {
+    widen_visibility(node, editor, Reach::Crate)
+}
+
+/// Gives `node` at least the visibility `reach` asks for; never narrows.
+fn widen_visibility(node: &SyntaxNode, editor: &SyntaxEditor, reach: Reach) {
     let existing = ast::AnyHasVisibility::cast(node.clone()).and_then(|it| it.visibility());
-    // `pub(self)` is private spelled out, and reaches exactly as far.
-    if existing.as_ref().is_some_and(|vis| !matches!(vis.kind(), ast::VisibilityKind::PubSelf)) {
+    let enough = match (reach, existing.as_ref().map(|it| it.kind())) {
+        (Reach::Module, _) => true,
+        // `pub(self)` is private spelled out, and reaches exactly as far.
+        (Reach::Crate, Some(kind)) => !matches!(kind, ast::VisibilityKind::PubSelf),
+        (Reach::Public, Some(ast::VisibilityKind::Pub)) => true,
+        (_, _) => false,
+    };
+    if enough {
         return;
     }
-    let vis = editor.make().visibility_pub_crate();
+    let vis = match reach {
+        Reach::Public => editor.make().visibility_pub(),
+        _ => editor.make().visibility_pub_crate(),
+    };
     match existing {
         Some(old) => editor.replace(old.syntax(), vis.syntax()),
         None => {
@@ -863,13 +1107,27 @@ fn stale_self_path(
 /// Deletes the item along with the newline it sat on, so the source file is not
 /// left with a hole. The first item in a file has no whitespace in front of it
 /// to take, so it takes what follows instead.
-fn remove_item_taking_line(node: &SyntaxNode, editor: &SyntaxEditor) {
+///
+/// Two neighbours removed in one change share the whitespace between them, and
+/// deleting it twice is a conflict — so `taken` holds what earlier removals of
+/// the same change already claimed, and a removal that finds its line taken
+/// reaches for the other side instead.
+fn remove_item_taking_line(
+    node: &SyntaxNode,
+    editor: &SyntaxEditor,
+    taken: &mut Vec<(FileId, TextRange)>,
+    file: FileId,
+) {
     let whitespace = |element: Option<SyntaxElement>| {
-        element.and_then(|it| it.into_token()).filter(|it| it.kind() == SyntaxKind::WHITESPACE)
+        element
+            .and_then(|it| it.into_token())
+            .filter(|it| it.kind() == SyntaxKind::WHITESPACE)
+            .filter(|it| !taken.contains(&(file, it.text_range())))
     };
-    if let Some(ws) = whitespace(node.prev_sibling_or_token()) {
-        editor.delete(ws);
-    } else if let Some(ws) = whitespace(node.next_sibling_or_token()) {
+    let ws = whitespace(node.prev_sibling_or_token())
+        .or_else(|| whitespace(node.next_sibling_or_token()));
+    if let Some(ws) = ws {
+        taken.push((file, ws.text_range()));
         editor.delete(ws);
     }
     editor.delete(node);
@@ -910,18 +1168,36 @@ fn relocated_declaration(
 }
 
 /// `None` for a same-crate reference, else the name `ref_file`'s crate depends
-/// on it under (which honours `package = "…"` renames).
+/// on `moved_crate` under (which honours `package = "…"` renames).
+///
+/// `moved_crate` is where the thing lives *after* the move. A crate that does
+/// not depend on it has no way to spell the new path at all — returning `None`
+/// there, as this once did, reads as "same crate" and writes `crate::…` into a
+/// crate the path does not start from.
 fn crate_root_prefix_for(
     sema: &Semantics<'_, RootDatabase>,
     ref_file: FileId,
     moved_crate: hir::Crate,
     db: &RootDatabase,
-) -> Option<Name> {
-    let ref_crate = sema.file_to_module_def(ref_file)?.krate(db);
+) -> Result<Option<Name>> {
+    let Some(ref_module) = sema.file_to_module_def(ref_file) else { return Ok(None) };
+    let ref_crate = ref_module.krate(db);
     if ref_crate == moved_crate {
-        return None;
+        return Ok(None);
     }
-    ref_crate.dependencies(db).into_iter().find(|dep| dep.krate == moved_crate).map(|dep| dep.name)
+    match ref_crate.dependencies(db).into_iter().find(|dep| dep.krate == moved_crate) {
+        Some(dep) => Ok(Some(dep.name)),
+        None => {
+            let name = |krate: hir::Crate| {
+                krate.display_name(db).map_or_else(|| "?".to_owned(), |it| it.to_string())
+            };
+            bail!(
+                "Crate `{}` refers to the item but does not depend on `{}`, where it would move",
+                name(ref_crate),
+                name(moved_crate)
+            )
+        }
+    }
 }
 
 /// `crate::…` inside the same crate, else `<extern crate>::…`.

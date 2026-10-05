@@ -26,14 +26,14 @@ use crate::{
     source_change::ChangeAnnotation,
     text_edit::{TextEdit, TextEditBuilder},
 };
-use base_db::AnchoredPathBuf;
+use base_db::{AnchoredPathBuf, SourceDatabase};
 use either::Either;
 use hir::{
     AsAssocItem, EditionedFileId, FieldSource, FileRange, FindPathConfig, HasCrate, HasSource,
     HirFileId, InFile, ModPath, ModuleSource, Name, PathKind, Semantics, sym,
 };
 use itertools::Itertools;
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 use span::{Edition, FileId, SyntaxContext};
 use stdx::{TupleExt, never};
 use syntax::{
@@ -438,6 +438,186 @@ pub fn move_mod(
     builder.add_file_edits(moved_file_id, super_editor);
 
     Ok(builder.finish())
+}
+
+/// Renames a workspace crate where its dependents name it. Emits text edits to
+/// `.rs` files only: the manifests, which hold the name in the first place, are
+/// the caller's to rewrite.
+///
+/// Every token spelled `old` that names the crate's root is renamed, wherever it
+/// stands — that is what keeps the names consistent with each other. A dependent
+/// on an edge called `old` spells the crate that way, and so does any crate that
+/// reaches it through a binding of that name: `pub use old;` in one crate is
+/// `mid::old` in the next, and both become `new`. A binding written as
+/// `use x as old` or `extern crate self as old` is a binding of that name too,
+/// and becomes `as new`. A dependent on an alias (`alias = { package = "old" }`)
+/// spells the crate `alias::…` and is not edited: its manifest's `package` is
+/// all that changes there.
+///
+/// Rewritten: a named path segment that resolves to the crate root (`use old::…`,
+/// `old::f()`, `::old::…`, `use old as x`, `mid::old::…`), the same token inside a
+/// macro call's input, the name in `extern crate old [as y];`, and `as old`.
+/// Left as is: `crate`/`self`/`super`/`$crate`, which name no crate by text,
+/// paths that only exist in a macro's expansion, and `macro_rules!` bodies.
+pub fn rename_crate(
+    sema: &Semantics<'_, RootDatabase>,
+    krate: hir::Crate,
+    new_name: &str,
+) -> Result<SourceChange> {
+    let db = sema.db;
+    if !krate.origin(db).is_local() {
+        bail!("Cannot rename a non-local crate");
+    }
+    let old_name =
+        crate_lib_name(db, krate).ok_or_else(|| format_err!("The crate has no name to rename"))?;
+    let edition = krate.edition(db);
+    let (new, kind) = IdentifierKind::classify(edition, new_name)?;
+    // A lib name is what `extern crate` and `--extern` take: no raw form exists,
+    // so a keyword — of the newest edition, which any dependent may be on — is
+    // out, though `classify` would accept it as `r#…`.
+    if kind != IdentifierKind::Ident
+        || new_name.starts_with("r#")
+        || SyntaxKind::from_keyword(new_name, Edition::LATEST).is_some()
+    {
+        bail!("Invalid name `{new_name}`: not a crate name");
+    }
+    if new.as_str() == old_name {
+        bail!("The crate is already named `{old_name}`");
+    }
+
+    // Targets of one package — lib, bins, tests — share a name by design; another
+    // package's crate under the new name would make every `use new::…` ambiguous.
+    let package = local_package_name(db, krate);
+    if let Some(taken) = hir::Crate::all(db).into_iter().find(|&other| {
+        other.origin(db).is_local()
+            && local_package_name(db, other) != package
+            && crate_lib_name(db, other).as_deref() == Some(new.as_str())
+    }) {
+        bail!(
+            "Crate name `{}` is already taken by package `{}`",
+            new.as_str(),
+            local_package_name(db, taken).as_deref().unwrap_or("?")
+        );
+    }
+
+    // Only a dependent spelling the crate `old` gets `new` in its code; one that
+    // spells it by an alias is not edited, so its other edges are no concern.
+    for dependent in hir::Crate::all(db) {
+        let deps = dependent.dependencies(db);
+        if !deps.iter().any(|dep| dep.krate == krate && dep.name.as_str() == old_name) {
+            continue;
+        }
+        if let Some(dep) = deps.iter().find(|dep| dep.name.as_str() == new.as_str()) {
+            bail!(
+                "Crate `{}` already depends on `{}` under the name `{}`",
+                crate_lib_name(db, dependent).as_deref().unwrap_or("?"),
+                crate_lib_name(db, dep.krate).as_deref().unwrap_or("?"),
+                new.as_str()
+            );
+        }
+    }
+
+    // Ranges spelled `old` that name the crate, per file. A set, since a token
+    // can be reached both by the search and by the pass over bindings below.
+    let mut renamed: FxHashMap<EditionedFileId, FxHashSet<TextRange>> = FxHashMap::default();
+
+    // The search's default scope for a crate root: the crate itself and all its
+    // transitive dependents, which is where a binding of its name can reach.
+    let usages = Definition::Module(krate.root_module(db)).usages(sema).all();
+    for (file_id, references) in usages.iter() {
+        let root = sema.parse(file_id).syntax().clone();
+        for reference in references {
+            let range = match named_segment_in_source(reference) {
+                // The search matches text, so what it found is spelled `old`.
+                Some((name_ref, _)) => name_ref.syntax().text_range(),
+                // Reached through a macro: renamed in the call's input when the
+                // token there is the crate's name, i.e. the argument the expansion
+                // quoted. A path the macro itself spells is not in this file.
+                None => match root.covering_element(reference.range).into_token() {
+                    Some(token)
+                        if token.kind() == SyntaxKind::IDENT
+                            && token.text() == old_name
+                            && token
+                                .parent()
+                                .is_some_and(|it| ast::TokenTree::can_cast(it.kind())) =>
+                    {
+                        token.text_range()
+                    }
+                    _ => continue,
+                },
+            };
+            renamed.entry(file_id).or_default().insert(range);
+        }
+    }
+
+    // The search looks for the crate root and finds what resolves to it; the
+    // declarations that *bind* its name classify as something else — `extern
+    // crate old;` as a shorthand for the declaration, `extern crate old as y;` as
+    // the crate, `as old` as the binding — and are collected here.
+    let files = krate
+        .transitive_reverse_dependencies(db)
+        .flat_map(|it| crate::search::SearchScope::krate(db, it))
+        .map(|(file, _)| file)
+        .unique();
+    for file_id in files {
+        if !db.file_text(file_id.file_id(db)).text(db).contains(old_name.as_str()) {
+            continue;
+        }
+        let root = sema.parse(file_id).syntax().clone();
+        for extern_crate in root.descendants().filter_map(ast::ExternCrate::cast) {
+            let Some(decl) = sema.to_def(&extern_crate) else { continue };
+            if decl.resolved_crate(db) != Some(krate) {
+                continue;
+            }
+            if let Some(name_ref) = extern_crate.name_ref()
+                && name_ref.text() == old_name
+            {
+                renamed.entry(file_id).or_default().insert(name_ref.syntax().text_range());
+            }
+            if let Some(name) = extern_crate.rename().and_then(|it| it.name())
+                && name.text() == old_name
+            {
+                renamed.entry(file_id).or_default().insert(name.syntax().text_range());
+            }
+        }
+        for use_tree in root.descendants().filter_map(ast::UseTree::cast) {
+            let Some(name) = use_tree.rename().and_then(|it| it.name()) else { continue };
+            if name.text() != old_name {
+                continue;
+            }
+            let Some(path) = use_tree.path() else { continue };
+            if let Some(hir::PathResolution::Def(hir::ModuleDef::Module(module))) =
+                sema.resolve_path(&path)
+                && module == krate.root_module(db)
+            {
+                renamed.entry(file_id).or_default().insert(name.syntax().text_range());
+            }
+        }
+    }
+
+    let mut source_change = SourceChange::default();
+    for (file_id, ranges) in renamed {
+        let new_text = new.display(db, file_id.edition(db)).to_string();
+        let mut edit = TextEdit::builder();
+        for range in ranges.into_iter().sorted_by_key(|it| it.start()) {
+            edit.replace(range, new_text.clone());
+        }
+        source_change.insert_source_edit(file_id.file_id(db), edit.finish());
+    }
+    Ok(source_change)
+}
+
+/// The name a crate is written by in `use` — its lib target's, with `_` for `-`.
+fn crate_lib_name(db: &RootDatabase, krate: hir::Crate) -> Option<String> {
+    krate.display_name(db).map(|it| it.crate_name().to_string())
+}
+
+/// The package a local crate is a target of: lib, bins and tests share it.
+pub fn local_package_name(db: &RootDatabase, krate: hir::Crate) -> Option<String> {
+    match krate.origin(db) {
+        base_db::CrateOrigin::Local { name, .. } => name.map(|it| it.as_str().to_owned()),
+        _ => None,
+    }
 }
 
 /// Must stay in sync with [`crate::path_transform`]: [`stale_self_path`]
@@ -1333,31 +1513,14 @@ fn rewrite_references_for_move(
     // Bucketed by enclosing `use`: rewriting `use a::{m::X, m::Y}` member-by-member
     // would split out the first and leave the second pointing at a vanished `a::m`.
     let mut use_groups: Vec<(ast::Use, Vec<(ast::UseTree, ast::Path)>)> = Vec::new();
-    for FileReference { range, name, .. } in references {
+    for reference in references {
+        let range = &reference.range;
         if edited_ranges.contains(&range.start()) {
             continue;
         }
-        let Some(name_ref) = name.as_name_ref() else { continue };
-        // A macro-expanded reference has a differing node/range — can't splice safely.
-        if name_ref.syntax().text_range() != *range {
-            continue;
-        }
-        let Some(segment) = name_ref.syntax().parent().and_then(ast::PathSegment::cast) else {
-            continue;
-        };
         // Keyword-anchored references are relative and only reachable from inside
         // the moved subtree, which travels along — rewriting them would corrupt.
-        if matches!(
-            segment.kind(),
-            Some(
-                ast::PathSegmentKind::SuperKw
-                    | ast::PathSegmentKind::SelfKw
-                    | ast::PathSegmentKind::CrateKw
-                    | ast::PathSegmentKind::SelfTypeKw
-            )
-        ) {
-            continue;
-        }
+        let Some((name_ref, segment)) = named_segment_in_source(reference) else { continue };
         let Some(path) = segment.syntax().parent().and_then(ast::Path::cast) else { continue };
         // In `use a::{m, n}` the member's real prefix lives on an outer `UseTree`,
         // so it can't be rewritten in place — defer to the whole-group pass below.
@@ -1387,6 +1550,23 @@ fn rewrite_references_for_move(
     }
     for (use_item, members) in &use_groups {
         rewrite_use_group_for_move(use_item, members, &new_abs, editor, edition);
+    }
+}
+
+/// The path segment `reference` names, when the reference is written in the file
+/// itself and by name. A reference reached through a macro expansion has a node
+/// whose range differs from the reference's, so it cannot be spliced in place;
+/// a `super`/`self`/`crate`/`Self` segment names a place relative to where it
+/// is written, not the definition, so no rename or move respells it.
+fn named_segment_in_source(reference: &FileReference) -> Option<(ast::NameRef, ast::PathSegment)> {
+    let name_ref = reference.name.as_name_ref()?;
+    if name_ref.syntax().text_range() != reference.range {
+        return None;
+    }
+    let segment = name_ref.syntax().parent().and_then(ast::PathSegment::cast)?;
+    match segment.kind()? {
+        ast::PathSegmentKind::Name(_) => Some((name_ref.clone(), segment)),
+        _ => None,
     }
 }
 

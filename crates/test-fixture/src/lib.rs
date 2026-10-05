@@ -67,6 +67,8 @@ pub const WORKSPACE: base_db::SourceRootId = base_db::SourceRootId(0);
 /// - **`crate:<name>`**: Defines a new crate with this file as its root
 ///   - Optional version: `crate:foo@0.1.0,https://example.com/repo.git`
 /// - **`deps:<crate1>,<crate2>`**: Dependencies (requires `crate:`)
+///   - Renamed dependency: `deps:alias=foo` depends on `foo` under the name `alias`,
+///     as Cargo's `alias = { package = "foo" }` does
 /// - **`extern-prelude:<crate1>,<crate2>`**: Limits extern prelude to specified crates
 /// - **`edition:<year>`**: Rust edition (2015, 2018, 2021, 2024). Defaults to current.
 /// - **`cfg:<key>=<value>,<flag>`**: Configuration options, e.g., `cfg:test,feature="foo"`
@@ -359,8 +361,11 @@ impl ChangeFixture {
                         Some(v) => v.contains(&dep),
                         None => true,
                     };
-                    let dep = CrateName::normalize_dashes(&dep);
-                    crate_deps.push((crate_name.clone(), dep, prelude))
+                    // `alias=foo`: the edge is named `alias`, the crate is `foo`.
+                    let (edge, dep) = dep.split_once('=').unwrap_or((&dep, &dep));
+                    let edge = CrateName::normalize_dashes(edge);
+                    let dep = CrateName::normalize_dashes(dep);
+                    crate_deps.push((crate_name.clone(), edge, dep, prelude))
                 }
             } else if meta.path == "/main.rs" || meta.path == "/lib.rs" {
                 assert!(default_crate_root.is_none());
@@ -452,14 +457,14 @@ impl ChangeFixture {
                 }
             }
 
-            for (from, to, prelude) in crate_deps {
+            for (from, edge, to, prelude) in crate_deps {
                 let from_id = crates[&from];
                 let to_id = crates[&to];
                 let sysroot = crate_graph[to_id].basic.origin.is_lang();
                 crate_graph
                     .add_dep(
                         from_id,
-                        DependencyBuilder::with_prelude(to.clone(), to_id, prelude, sysroot),
+                        DependencyBuilder::with_prelude(edge, to_id, prelude, sysroot),
                     )
                     .unwrap();
             }

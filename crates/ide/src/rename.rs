@@ -288,6 +288,55 @@ pub(crate) fn move_item(
     ide_db::rename::move_item(&sema, item, dst, insert_use_cfg)
 }
 
+/// Rename the workspace crate whose lib target is called `crate_name` — the name
+/// `use` spells it by. See [`ide_db::rename::rename_crate`].
+pub(crate) fn rename_crate(
+    db: &RootDatabase,
+    crate_name: &str,
+    new_name: &str,
+) -> RenameResult<SourceChange> {
+    let sema = Semantics::new(db);
+    let (crates, _, _) = split_crate_path(db, crate_name)?;
+    let krate = lib_target_of(db, crate_name, crates)?;
+    ide_db::rename::rename_crate(&sema, krate, new_name)
+}
+
+/// The lib among the crates sharing `crate_name`. A package's bin is named after
+/// it as well, and is told apart by depending on the lib; two packages whose libs
+/// share the name are a question only the caller can answer.
+fn lib_target_of(
+    db: &RootDatabase,
+    crate_name: &str,
+    crates: Vec<hir::Crate>,
+) -> RenameResult<hir::Crate> {
+    let local: Vec<hir::Crate> = crates.into_iter().filter(|it| it.origin(db).is_local()).collect();
+    if local.is_empty() {
+        bail!("Cannot rename a non-local crate");
+    }
+    let libs: Vec<hir::Crate> = local
+        .iter()
+        .copied()
+        .filter(|&candidate| {
+            !local
+                .iter()
+                .any(|&other| candidate.dependencies(db).iter().any(|dep| dep.krate == other))
+        })
+        .collect();
+    match libs.as_slice() {
+        [lib] => Ok(*lib),
+        [] => bail!("No lib target named `{crate_name}`"),
+        _ => {
+            let packages = libs
+                .iter()
+                .map(|&it| {
+                    ide_db::rename::local_package_name(db, it).unwrap_or_else(|| "?".to_owned())
+                })
+                .join(", ");
+            bail!("`{crate_name}` names the lib of more than one package: {packages}")
+        }
+    }
+}
+
 /// Crate-relative segments of `path`, paired with every crate its head names —
 /// plural, because a lib and a bin target can share one.
 fn split_crate_path(
@@ -5894,6 +5943,302 @@ pub fn main() {
     }
 }
 "#,
+        );
+    }
+
+    fn check_rename_crate(
+        crate_name: &str,
+        new_name: &str,
+        #[rust_analyzer::rust_fixture] ra_fixture: &str,
+        expect: Expect,
+    ) {
+        let (analysis, _) = fixture::file(ra_fixture);
+        let rendered = match analysis.rename_crate(crate_name, new_name).unwrap() {
+            Ok(source_change) => {
+                let mut rendered = String::new();
+                for (&file_id, (edit, _)) in
+                    source_change.source_file_edits.iter().sorted_by_key(|&(&id, _)| id)
+                {
+                    let mut text = analysis.file_text(file_id).unwrap().to_string();
+                    edit.apply(&mut text);
+                    format_to!(rendered, "//- {file_id:?}\n{text}\n");
+                }
+                rendered
+            }
+            Err(err) => format!("error: {err}"),
+        };
+        expect.assert_eq(&rendered)
+    }
+
+    #[test]
+    fn rename_crate_rewrites_direct_dependent() {
+        check_rename_crate(
+            "old",
+            "new",
+            r#"
+//- /main.rs crate:main deps:old,other
+use old::a;
+use old as x;
+use {old::b, other::c};
+fn f() { old::a(); ::old::m::d(); x::a(); a(); }
+mod m { use old::m::*; }
+//- /old/lib.rs crate:old
+pub fn a() {}
+pub fn b() {}
+pub mod m { pub fn d() {} }
+//- /other/lib.rs crate:other
+pub fn c() {}
+"#,
+            expect![[r#"
+                //- FileId(0)
+                use new::a;
+                use new as x;
+                use {new::b, other::c};
+                fn f() { new::a(); ::new::m::d(); x::a(); a(); }
+                mod m { use new::m::*; }
+
+            "#]],
+        );
+    }
+
+    #[test]
+    fn rename_crate_leaves_aliased_dependent_alone() {
+        // `alias = { package = "old" }`: the dependent spells the crate by its
+        // own name for it, and that name does not change. An edge it already has
+        // under the new name is no collision, since nothing of it gets renamed.
+        check_rename_crate(
+            "old",
+            "new",
+            r#"
+//- /main.rs crate:main deps:alias=old,new=other
+use alias::a;
+fn f() { alias::a(); new::c(); }
+//- /old/lib.rs crate:old
+pub fn a() {}
+//- /other/lib.rs crate:other
+pub fn c() {}
+"#,
+            expect![[r#""#]],
+        );
+    }
+
+    #[test]
+    fn rename_crate_rewrites_extern_crate() {
+        check_rename_crate(
+            "old",
+            "new",
+            r#"
+//- /main.rs crate:main deps:old edition:2015
+extern crate old;
+fn f() { old::a(); }
+//- /dep.rs crate:dep deps:old
+extern crate old as y;
+fn g() { y::a(); old::a(); }
+//- /old/lib.rs crate:old
+pub fn a() {}
+"#,
+            expect![[r#"
+                //- FileId(0)
+                extern crate new;
+                fn f() { new::a(); }
+
+                //- FileId(1)
+                extern crate new as y;
+                fn g() { y::a(); new::a(); }
+
+            "#]],
+        );
+    }
+
+    #[test]
+    fn rename_crate_leaves_crate_and_dollar_crate_alone() {
+        // Inside the crate it is `crate::`, and its macros reach it by `$crate`:
+        // neither spells the name, so neither changes — the crate's own files are
+        // not edited at all.
+        check_rename_crate(
+            "old",
+            "new",
+            r#"
+//- /main.rs crate:main deps:old
+fn f() { old::make!(); }
+//- /old/lib.rs crate:old
+pub fn a() { crate::b(); }
+pub fn b() {}
+#[macro_export]
+macro_rules! make { () => { $crate::a() }; }
+"#,
+            expect![[r#"
+                //- FileId(0)
+                fn f() { new::make!(); }
+
+            "#]],
+        );
+    }
+
+    #[test]
+    fn rename_crate_follows_reexport_into_transitive_dependent() {
+        // `top` has no edge to `old`, yet names it: `mid` re-exports it under its
+        // own name, and that name changes with it. `mid::old2` re-exports it under
+        // another, which stays.
+        check_rename_crate(
+            "old",
+            "new",
+            r#"
+//- /top.rs crate:top deps:mid
+fn f() { mid::old::a(); mid::old2::a(); }
+//- /mid.rs crate:mid deps:old
+pub use old;
+pub use old as old2;
+//- /old/lib.rs crate:old
+pub fn a() {}
+"#,
+            expect![[r#"
+                //- FileId(0)
+                fn f() { mid::new::a(); mid::old2::a(); }
+
+                //- FileId(1)
+                pub use new;
+                pub use new as old2;
+
+            "#]],
+        );
+    }
+
+    #[test]
+    fn rename_crate_renames_bindings_of_its_name() {
+        // `extern crate self as old;` lets a crate's own macros say `old::…`, and
+        // `use alias as old;` binds the name in an aliased dependent: both bind
+        // exactly the name that changes, so the binding changes with it.
+        check_rename_crate(
+            "old",
+            "new",
+            r#"
+//- /main.rs crate:main deps:alias=old
+use alias as old;
+fn f() { old::a(); alias::a(); }
+//- /old/lib.rs crate:old
+extern crate self as old;
+pub fn a() { old::b(); }
+pub fn b() {}
+"#,
+            expect![[r#"
+                //- FileId(0)
+                use alias as new;
+                fn f() { new::a(); alias::a(); }
+
+                //- FileId(1)
+                extern crate self as new;
+                pub fn a() { new::b(); }
+                pub fn b() {}
+
+            "#]],
+        );
+    }
+
+    #[test]
+    fn rename_crate_rewrites_macro_call_input() {
+        // The name passed into a macro call is renamed where it is written; a path
+        // the dependent's own `macro_rules!` spells in its body is not a reference
+        // and stays — a known limit, as for every rename.
+        check_rename_crate(
+            "old",
+            "new",
+            r#"
+//- /main.rs crate:main deps:old
+macro_rules! call { ($p:path) => { $p() }; }
+macro_rules! fixed { () => { old::a() }; }
+fn f() { call!(old::a); fixed!(); }
+//- /old/lib.rs crate:old
+pub fn a() {}
+"#,
+            expect![[r#"
+                //- FileId(0)
+                macro_rules! call { ($p:path) => { $p() }; }
+                macro_rules! fixed { () => { old::a() }; }
+                fn f() { call!(new::a); fixed!(); }
+
+            "#]],
+        );
+    }
+
+    #[test]
+    fn rename_crate_refuses_non_local_crate() {
+        check_rename_crate(
+            "old",
+            "new",
+            r#"
+//- /main.rs crate:main deps:old
+use old::a;
+//- /old/lib.rs crate:old library
+pub fn a() {}
+"#,
+            expect!["error: Cannot rename a non-local crate"],
+        );
+    }
+
+    #[test]
+    fn rename_crate_refuses_taken_name() {
+        check_rename_crate(
+            "old",
+            "new",
+            r#"
+//- /main.rs crate:main deps:old
+use old::a;
+//- /old/lib.rs crate:old
+pub fn a() {}
+//- /new/lib.rs crate:new
+"#,
+            expect!["error: Crate name `new` is already taken by package `new`"],
+        );
+    }
+
+    #[test]
+    fn rename_crate_refuses_edge_collision() {
+        check_rename_crate(
+            "old",
+            "new",
+            r#"
+//- /main.rs crate:main deps:old,new=other
+use old::a;
+//- /old/lib.rs crate:old
+pub fn a() {}
+//- /other/lib.rs crate:other
+"#,
+            expect!["error: Crate `main` already depends on `other` under the name `new`"],
+        );
+    }
+
+    #[test]
+    fn rename_crate_refuses_invalid_name() {
+        let fixture = r#"
+//- /main.rs crate:main deps:old
+use old::a;
+//- /old/lib.rs crate:old
+pub fn a() {}
+"#;
+        check_rename_crate(
+            "old",
+            "fn",
+            fixture,
+            expect!["error: Invalid name `fn`: not a crate name"],
+        );
+        check_rename_crate(
+            "old",
+            "a-b",
+            fixture,
+            expect!["error: Invalid name `a-b`: not an identifier"],
+        );
+        check_rename_crate(
+            "old",
+            "r#new",
+            fixture,
+            expect!["error: Invalid name `r#new`: not a crate name"],
+        );
+        check_rename_crate(
+            "old",
+            "_",
+            fixture,
+            expect!["error: Invalid name `_`: not a crate name"],
         );
     }
 }

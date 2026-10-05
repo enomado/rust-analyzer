@@ -917,6 +917,16 @@ impl Analysis {
         self.with_db(|db| rename::move_item(db, item_path, destination, insert_use_cfg))
     }
 
+    /// Rename a workspace crate, named by its lib target as `use` spells it.
+    /// Edits `.rs` files only; the manifests are the caller's.
+    pub fn rename_crate(
+        &self,
+        crate_name: &str,
+        new_name: &str,
+    ) -> Cancellable<Result<SourceChange, RenameError>> {
+        self.with_db(|db| rename::rename_crate(db, crate_name, new_name))
+    }
+
     pub fn structural_search_replace(
         &self,
         query: &str,

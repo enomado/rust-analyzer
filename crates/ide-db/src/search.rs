@@ -193,7 +193,7 @@ impl SearchScope {
     }
 
     /// Build a search scope spanning the given crate.
-    fn krate(db: &RootDatabase, of: hir::Crate) -> SearchScope {
+    pub fn krate(db: &RootDatabase, of: hir::Crate) -> SearchScope {
         let root_file = of.root_file(db);
 
         let source_root_id = db.file_source_root(root_file).source_root_id(db);

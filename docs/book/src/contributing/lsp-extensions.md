@@ -1,5 +1,5 @@
 <!---
-lsp/ext.rs hash: 21ba73fcb7fe445b
+lsp/ext.rs hash: 8cc91c162affe5d
 
 If you need to change the above hash to make the test pass, please check if you
 need to adjust this doc as well and ping this issue:
@@ -980,6 +980,32 @@ export interface MoveItemToModuleParams {
     /// The module to move it into, e.g. `my_crate::b`; the crate name alone
     /// names the crate root.
     destination: string
+}
+```
+
+## Rename Crate
+
+This request is sent from client to server to rename a workspace crate in every
+`.rs` file that names it: the paths of its dependents, re-exports of it followed
+into theirs, `extern crate` and `as` bindings of its name. A dependent that
+depends on it under an alias is left as is.
+
+Only text edits come back. The crate's name lives in its manifests, which the
+server does not edit: renaming `[package] name` / `[lib] name` and the
+dependency keys, and reloading the workspace, is the client's job.
+
+**Method:** `experimental/renameCrate`
+
+**Request:** `RenameCrateParams`
+
+**Response:** `WorkspaceEdit | null`
+
+```typescript
+export interface RenameCrateParams {
+    /// The crate's current lib name, as `use` spells it: `my_crate`.
+    crateName: string,
+    /// What `use` is to spell it as afterwards.
+    newName: string
 }
 ```
 

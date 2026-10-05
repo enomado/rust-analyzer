@@ -1563,6 +1563,122 @@ pub fn moved() { helper(); }
 }
 
 #[test]
+fn test_rename_crate() {
+    if skip_slow_tests() {
+        return;
+    }
+
+    let tmp_dir = TestDir::new();
+
+    // Real manifests, because what the unit tests cannot build is here: the
+    // package's own bin and integration test reach its lib under the same name
+    // as the lib itself, and `aliased` depends on it through `package = "old"`.
+    let code = r#"
+//- /Cargo.toml
+[workspace]
+members = ["old", "user", "aliased"]
+
+//- /old/Cargo.toml
+[package]
+name = "old"
+version = "0.0.0"
+
+//- /old/src/lib.rs
+pub fn a() { crate::b(); }
+pub fn b() {}
+
+//- /old/src/main.rs
+fn main() { old::a(); }
+
+//- /old/tests/t.rs
+use old::b;
+#[test]
+fn t() { b(); }
+
+//- /user/Cargo.toml
+[package]
+name = "user"
+version = "0.0.0"
+
+[dependencies]
+old = { path = "../old" }
+
+//- /user/src/lib.rs
+use old::a;
+pub fn f() { a(); ::old::b(); }
+
+//- /aliased/Cargo.toml
+[package]
+name = "aliased"
+version = "0.0.0"
+
+[dependencies]
+al = { package = "old", path = "../old" }
+
+//- /aliased/src/lib.rs
+pub fn g() { al::a(); }
+"#;
+    let server =
+        Project::with_fixture(code).tmp_dir(tmp_dir).server().wait_until_workspace_is_loaded();
+
+    server.request::<rust_analyzer::lsp::ext::RenameCrateRequest>(
+        rust_analyzer::lsp::ext::RenameCrateParams {
+            crate_name: "old".to_owned(),
+            new_name: "new".to_owned(),
+        },
+        // The lib's own files say `crate::` and stay; `aliased` says `al::` and
+        // stays. Its bin and its test, and `user`, spell `old` and change.
+        json!({
+          "documentChanges": [
+            {
+              "textDocument": { "uri": "file://[..]/user/src/lib.rs", "version": null },
+              "edits": [
+                {
+                  "range": {
+                    "start": { "line": 0, "character": 4 },
+                    "end": { "line": 0, "character": 7 }
+                  },
+                  "newText": "new"
+                },
+                {
+                  "range": {
+                    "start": { "line": 1, "character": 20 },
+                    "end": { "line": 1, "character": 23 }
+                  },
+                  "newText": "new"
+                }
+              ]
+            },
+            {
+              "textDocument": { "uri": "file://[..]/old/tests/t.rs", "version": null },
+              "edits": [
+                {
+                  "range": {
+                    "start": { "line": 0, "character": 4 },
+                    "end": { "line": 0, "character": 7 }
+                  },
+                  "newText": "new"
+                }
+              ]
+            },
+            {
+              "textDocument": { "uri": "file://[..]/old/src/main.rs", "version": null },
+              "edits": [
+                {
+                  "range": {
+                    "start": { "line": 0, "character": 12 },
+                    "end": { "line": 0, "character": 15 }
+                  },
+                  "newText": "new"
+                }
+              ]
+            }
+          ]
+        }),
+    );
+}
+
+#[test]
 fn test_will_rename_files_cross_parent() {
     if skip_slow_tests() {
         return;

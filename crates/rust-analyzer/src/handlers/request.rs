@@ -2237,6 +2237,20 @@ pub(crate) fn handle_move_item_to_module(
     Ok(Some(to_proto::workspace_edit(&snap, source_change)?))
 }
 
+pub(crate) fn handle_rename_crate(
+    snap: GlobalStateSnapshot,
+    params: lsp_ext::RenameCrateParams,
+) -> anyhow::Result<Option<lsp_types::WorkspaceEdit>> {
+    let _p = tracing::info_span!("handle_rename_crate").entered();
+
+    let source_change = snap
+        .analysis
+        .rename_crate(&params.crate_name, &params.new_name)?
+        .map_err(to_proto::rename_error)?;
+
+    Ok(Some(to_proto::workspace_edit(&snap, source_change)?))
+}
+
 pub(crate) fn handle_view_recursive_memory_layout(
     snap: GlobalStateSnapshot,
     params: lsp_types::TextDocumentPositionParams,

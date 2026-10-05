@@ -848,6 +848,26 @@ pub struct MoveItemToModuleParams {
     pub destination: String,
 }
 
+/// Rename a workspace crate in the `.rs` files that name it. The manifests,
+/// which hold the name in the first place, are left to the client.
+pub enum RenameCrateRequest {}
+
+impl Request for RenameCrateRequest {
+    type Params = RenameCrateParams;
+    type Result = Option<lsp_types::WorkspaceEdit>;
+    const METHOD: LspRequestMethod<'_> = LspRequestMethod::new("experimental/renameCrate");
+    const MESSAGE_DIRECTION: MessageDirection = MessageDirection::ClientToServer;
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct RenameCrateParams {
+    /// The crate's current lib name, as `use` spells it: `my_crate`.
+    pub crate_name: String,
+    /// What `use` is to spell it as afterwards.
+    pub new_name: String,
+}
+
 #[derive(Debug)]
 pub enum WorkspaceSymbolRequest {}
 

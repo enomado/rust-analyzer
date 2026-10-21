@@ -25,6 +25,11 @@ impl SyntaxError {
         self.1 = range;
         self
     }
+
+    /// The message's own allocation, for [`crate::heap_size`].
+    pub(crate) fn message_heap(&self) -> usize {
+        self.0.capacity()
+    }
 }
 
 impl fmt::Display for SyntaxError {

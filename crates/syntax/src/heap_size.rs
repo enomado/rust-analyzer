@@ -8,21 +8,26 @@
 //!
 //! # What the number counts, and what it leaves out
 //!
-//! Two things, both of which rowan certainly stores inline:
+//! Every allocation the parse owns, at the size it was requested with:
 //!
-//! * the child slots of every green node, and
-//! * the text of every green token.
+//! * each green node and green token — rowan's `ThinArc`: the reference count,
+//!   the header slice (header and length), then the child slots or the text,
+//!   rounded up to the alignment. That is rowan's own arithmetic in
+//!   `ThinArc::from_header_and_iter` (`arc.rs`); see [`thin_arc`];
+//! * the error list — a `triomphe::Arc<[SyntaxError]>` — and each message.
 //!
-//! It leaves out the per-allocation headers (refcount, kind, text length).
-//! Those are real bytes, but their layout is rowan's private business, and a
-//! number built on a guess about a private layout would keep looking right
-//! while quietly drifting. So this is a LOWER BOUND, like the rest of the
-//! `heap_size` family — and the useful direction, since a caller comparing
-//! ingredients wants "at least this much".
+//! It leaves out what the allocator adds per chunk (its header, its size
+//! classes): that belongs to the allocator, is the same for every ingredient,
+//! and shows up in the process portrait as fragmentation, not here.
 //!
-//! The one size taken from rowan is the child slot, and rowan asserts it
-//! itself (`static_assert!(size_of::<GreenChild>() == size_of::<usize>() * 2)`
-//! in `green/node.rs`) rather than leaving it to be inferred here.
+//! An earlier version counted only the child slots and the token text, on the
+//! grounds that rowan's allocation layout is private and a number built on it
+//! would drift silently. It undercounted several times over — a `;` token is a
+//! 32-byte allocation and was charged one byte — which left gigabytes of parse
+//! trees in the daemon's "unattributed" line. The drift is now caught instead
+//! of avoided: `tests/heap_size_oracle.rs` parses real files under a counting
+//! global allocator and requires the live bytes to equal this number exactly,
+//! so a rowan change to the layout fails that test rather than the report.
 //!
 //! # Why the walk deduplicates
 //!
@@ -33,7 +38,10 @@
 //! under-counting: it would move an ingredient up the report on bytes that do
 //! not exist. Hence the two sets of visited addresses.
 
-use std::{mem::size_of, ptr};
+use std::{
+    mem::{align_of, size_of},
+    ptr,
+};
 
 use rowan::{GreenNodeData, GreenTokenData, NodeOrToken};
 use rustc_hash::FxHashSet;
@@ -46,15 +54,53 @@ pub fn parse<T>(parse: &Parse<T>) -> usize {
     // The error list is owned here rather than shared with the `parse_errors`
     // query, which hands out a fresh `Box<[_]>`, so counting it here is not a
     // double count.
-    let errors =
-        parse.errors.as_deref().map_or(0, |errors| errors.len() * size_of::<SyntaxError>());
+    let errors = parse.errors.as_deref().map_or(0, error_list);
     green + errors
 }
 
 /// One pointer pair per child, as asserted in rowan's `green/node.rs`.
 const CHILD_SLOT: usize = 2 * size_of::<usize>();
 
+/// The reference count both `ArcInner`s (rowan's and triomphe's) put before
+/// the data.
+const ARC_COUNT: usize = size_of::<usize>();
+
+/// One rowan `ThinArc` allocation: the count, the header slice, `items` bytes
+/// of slots or text, rounded up to the alignment.
+///
+/// `head` is the size of the public zero-length repr (`GreenNodeData` /
+/// `GreenTokenData`, a `HeaderSlice<_, [_; 0]>`): header and length, with the
+/// slice starting right after them. The alignment is the larger of the count's
+/// and that repr's, which is how `ArcInner<HeaderSlice<H, [T; 0]>>` gets its own.
+fn thin_arc(head: usize, head_align: usize, items: usize) -> usize {
+    (ARC_COUNT + head + items).next_multiple_of(align_of::<usize>().max(head_align))
+}
+
+fn node_allocation(slots: usize) -> usize {
+    thin_arc(size_of::<GreenNodeData>(), align_of::<GreenNodeData>(), slots * CHILD_SLOT)
+}
+
+fn token_allocation(token: &GreenTokenData) -> usize {
+    thin_arc(size_of::<GreenTokenData>(), align_of::<GreenTokenData>(), token.text().len())
+}
+
+/// `triomphe::Arc<[SyntaxError]>`: the count, then the slice, padded; plus each
+/// message's own buffer.
+fn error_list(errors: &[SyntaxError]) -> usize {
+    let list = (ARC_COUNT + size_of_val(errors))
+        .next_multiple_of(align_of::<usize>().max(align_of::<SyntaxError>()));
+    list + errors.iter().map(SyntaxError::message_heap).sum::<usize>()
+}
+
 fn green_tree(root: &GreenNodeData) -> usize {
+    walk(root, true, true)
+}
+
+/// The walk behind [`green_tree`], with either visited-set switchable off so a
+/// test can ask what each half of the deduplication is worth on its own.
+/// Comparing against one walk with *both* off would pass while half the
+/// filtering was broken — which is exactly what happened when this was written.
+fn walk(root: &GreenNodeData, dedup_nodes: bool, dedup_tokens: bool) -> usize {
     let mut seen_nodes: FxHashSet<*const GreenNodeData> = FxHashSet::default();
     let mut seen_tokens: FxHashSet<*const GreenTokenData> = FxHashSet::default();
     // An explicit worklist rather than recursion: the depth here is the nesting
@@ -64,7 +110,7 @@ fn green_tree(root: &GreenNodeData) -> usize {
     let mut total = 0;
 
     while let Some(node) = worklist.pop() {
-        if !seen_nodes.insert(ptr::from_ref(node)) {
+        if dedup_nodes && !seen_nodes.insert(ptr::from_ref(node)) {
             continue;
         }
         let mut slots = 0;
@@ -73,13 +119,13 @@ fn green_tree(root: &GreenNodeData) -> usize {
             match child {
                 NodeOrToken::Node(node) => worklist.push(node),
                 NodeOrToken::Token(token) => {
-                    if seen_tokens.insert(ptr::from_ref(token)) {
-                        total += token.text().len();
+                    if !dedup_tokens || seen_tokens.insert(ptr::from_ref(token)) {
+                        total += token_allocation(token);
                     }
                 }
             }
         }
-        total += slots * CHILD_SLOT;
+        total += node_allocation(slots);
     }
 
     total
@@ -89,36 +135,6 @@ fn green_tree(root: &GreenNodeData) -> usize {
 mod tests {
     use super::*;
     use crate::{Edition, SourceFile};
-
-    /// The same walk with either visited-set switchable off, so a test can ask
-    /// what each half of the deduplication is worth on its own. Comparing
-    /// against one walk with *both* off would pass while half the filtering was
-    /// broken — which is exactly what happened when this was written.
-    fn walk(root: &GreenNodeData, dedup_nodes: bool, dedup_tokens: bool) -> usize {
-        let mut seen_nodes: FxHashSet<*const GreenNodeData> = FxHashSet::default();
-        let mut seen_tokens: FxHashSet<*const GreenTokenData> = FxHashSet::default();
-        let mut worklist = vec![root];
-        let mut total = 0;
-        while let Some(node) = worklist.pop() {
-            if dedup_nodes && !seen_nodes.insert(ptr::from_ref(node)) {
-                continue;
-            }
-            let mut slots = 0;
-            for child in node.children() {
-                slots += 1;
-                match child {
-                    NodeOrToken::Node(node) => worklist.push(node),
-                    NodeOrToken::Token(token) => {
-                        if !dedup_tokens || seen_tokens.insert(ptr::from_ref(token)) {
-                            total += token.text().len();
-                        }
-                    }
-                }
-            }
-            total += slots * CHILD_SLOT;
-        }
-        total
-    }
 
     fn parse_source(text: &str) -> crate::Parse<SourceFile> {
         SourceFile::parse(text, Edition::CURRENT)
@@ -138,12 +154,6 @@ mod tests {
 
         let deduped = green_tree(green);
         assert!(deduped > 0, "a parsed file cannot cost nothing");
-        assert_eq!(
-            deduped,
-            walk(green, true, true),
-            "the test's own walk no longer agrees with the real one; whatever changed in \
-             `green_tree` has left the comparisons below measuring something else"
-        );
 
         let without_node_dedup = walk(green, false, true);
         let without_token_dedup = walk(green, true, false);

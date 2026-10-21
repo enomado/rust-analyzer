@@ -1552,7 +1552,12 @@ impl ExpandTo {
 ///
 /// We encode macro definitions into ids of macro calls, this what allows us
 /// to be incremental.
-#[salsa::interned(unsafe(no_lifetime), debug, revisions = usize::MAX)]
+#[salsa::interned(
+    unsafe(no_lifetime),
+    debug,
+    revisions = usize::MAX,
+    heap_size = crate::heap_size::macro_call_loc
+)]
 #[doc(alias = "MacroFileId")]
 pub struct MacroCallId {
     #[returns(ref)]

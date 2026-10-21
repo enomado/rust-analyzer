@@ -303,6 +303,62 @@ m!(a);
         );
     }
 
+    /// The interned `MacroCallId` reports the buffers its call kind owns — here
+    /// an eager call's expanded argument — and `real_span_map` its anchors;
+    /// both follow the input. Read through salsa's own report, for the same
+    /// reason as above.
+    #[test]
+    fn eager_macro_calls_and_real_span_maps_are_weighed() {
+        fn heaps(#[rust_analyzer::rust_fixture] ra_fixture: &str) -> (usize, usize) {
+            let mut db = TestDB::with_files(ra_fixture);
+            crate_def_map(&db, db.fetch_test_crate());
+            let usage = <dyn salsa::Database>::memory_usage(&mut db);
+            let calls = usage
+                .structs
+                .iter()
+                .find(|info| info.debug_name() == "MacroCallId" && info.count() > 0)
+                .unwrap_or_else(|| {
+                    let named: Vec<_> = usage
+                        .structs
+                        .iter()
+                        .filter(|info| info.debug_name().contains("MacroCall"))
+                        .map(|info| (info.debug_name(), info.count()))
+                        .collect();
+                    panic!("positive control: no `MacroCallId` was interned; similar: {named:?}")
+                });
+            let spans = &usage.queries["real_span_map"];
+            assert!(spans.count() > 0, "positive control: `real_span_map` has no memos");
+            (
+                calls.heap_size_of_fields().expect("`MacroCallId` reports no heap size"),
+                spans.heap_size_of_fields().expect("`real_span_map` reports no heap size"),
+            )
+        }
+        let fixture = |args: usize, items: usize| {
+            format!(
+                // At item level: collecting the def map expands item macros,
+                // while a call inside a `const` waits for its body.
+                "//- /lib.rs\n#[rustc_builtin_macro]\nmacro_rules! concat {{}}\n\
+                 concat!({});\n{}",
+                vec!["\"a\""; args].join(", "),
+                (0..items).map(|i| format!("struct S{i};\n")).collect::<String>()
+            )
+        };
+
+        let (small_calls, small_spans) = heaps(&fixture(1, 0));
+        let (big_calls, _) = heaps(&fixture(300, 0));
+        let (_, big_spans) = heaps(&fixture(1, 200));
+
+        assert!(small_calls > 0, "an eager call owns its expanded argument, yet weighed 0");
+        assert!(
+            big_calls > small_calls,
+            "a 300-literal eager argument weighed no more than a 1-literal one ({small_calls} bytes)"
+        );
+        assert!(
+            big_spans > small_spans,
+            "200 more items left the real span maps at {small_spans} bytes"
+        );
+    }
+
     /// Nearly everything a def map owns hangs off the item scopes of its
     /// modules, which is the reason it is worth weighing at all.
     #[test]

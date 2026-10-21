@@ -147,3 +147,38 @@ fn f() {{ {lets} let c = || ({elements}); }}"
          reaching the total"
     );
 }
+
+/// The impl-lowering queries own their diagnostics box and nothing else: the
+/// lowered value is a handle into the solver's interners. So a clean impl
+/// header weighs zero — measured, not missing — and a header with a
+/// diagnostic weighs the box. Read through salsa's report, so the
+/// `heap_size = …` wiring is under test with the arithmetic.
+#[test]
+fn impl_lowering_weighs_its_diagnostics_and_nothing_else() {
+    /// `(impl_self_ty, impl_trait)` heaps after lowering every impl in the file.
+    fn heaps(#[rust_analyzer::rust_fixture] ra_fixture: &str) -> (usize, usize) {
+        let (mut db, file_id) = TestDB::with_single_file(ra_fixture);
+        crate::attach_db(&db, || {
+            let module = db.module_for_file(file_id.file_id(&db));
+            for impl_id in crate_def_map(&db, module.krate(&db))[module].scope.impls() {
+                hir_ty::db::HirDatabase::impl_self_ty(&db, impl_id);
+                hir_ty::db::HirDatabase::impl_trait(&db, impl_id);
+            }
+        });
+        let usage = <dyn salsa::Database>::memory_usage(&mut db);
+        let heap = |query: &str| {
+            let info = &usage.queries[query];
+            assert!(info.count() > 0, "positive control: `{query}` has no memos at all");
+            info.heap_size_of_fields().unwrap_or_else(|| panic!("`{query}` reports no heap size"))
+        };
+        (heap("impl_self_ty_with_diagnostics"), heap("impl_trait_with_diagnostics"))
+    }
+
+    let clean = heaps("trait Tr {} struct S; impl Tr for S {} impl S {}");
+    assert_eq!(clean, (0, 0), "a clean impl header owns no heap beyond interned handles");
+
+    // Generic arguments on a primitive are a lowering diagnostic.
+    let (self_ty, trait_ref) = heaps("trait Tr {} impl Tr for u8<i32> {} impl u16<i32> {}");
+    assert!(self_ty > 0, "a self type lowered with a diagnostic weighed nothing");
+    assert_eq!(trait_ref, 0, "the trait half of those impls is clean");
+}

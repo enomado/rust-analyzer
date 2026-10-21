@@ -10,6 +10,7 @@
 
 mod assert_linear;
 pub mod bench_fixture;
+pub mod counting_alloc;
 mod fixture;
 
 use std::{

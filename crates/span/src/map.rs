@@ -203,6 +203,14 @@ impl fmt::Display for RealSpanMap {
 }
 
 impl RealSpanMap {
+    /// What the map owns on the heap: the boxed slice of anchors, which a
+    /// `Box<[_]>` allocates at exactly its length (for the `heap_size` of
+    /// `real_span_map`).
+    pub fn heap_size(&self) -> usize {
+        let RealSpanMap { file_id: _, pairs, end: _ } = self;
+        size_of_val(&**pairs)
+    }
+
     /// Creates a real file span map that returns absolute ranges (relative ranges to the root ast id).
     pub fn absolute(file_id: EditionedFileId) -> Self {
         RealSpanMap {

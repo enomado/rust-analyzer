@@ -9,7 +9,59 @@ use std::mem::size_of;
 use span::{Span, TextSize};
 use syntax::{Parse, SyntaxNode};
 
-use crate::{ExpandResult, span_map::ExpansionSpanMap};
+use crate::{
+    AttrMacroAttrIds, AttrMacroAttrIdsRepr, EagerCallInfo, ExpandResult, MacroCallKind,
+    MacroCallLoc, span_map::ExpansionSpanMap,
+};
+
+/// `heap_size` for the interned `MacroCallId`: the buffers its call kind owns.
+///
+/// An eager call owns its expanded argument and an attribute macro its
+/// arguments, each in a `Box` of its own, plus the list of the attributes it
+/// censors when there are several. Both destructurings are exhaustive, so a
+/// field upstream adds is a compile error here rather than a silent zero.
+/// The eager call's `error` is not counted: an `ExpandError` is an `Arc`
+/// shared with whoever observed the same failure (as in
+/// [`parse_macro_expansion`]).
+pub(crate) fn macro_call_loc((loc,): &(MacroCallLoc,)) -> usize {
+    let MacroCallLoc { def: _, krate: _, kind, ctxt: _, macro_depth: _ } = loc;
+    match kind {
+        MacroCallKind::FnLike { ast_id: _, expand_to: _, eager } => {
+            eager.as_deref().map_or(0, |eager| {
+                let EagerCallInfo { arg, arg_id: _, error: _, span: _ } = eager;
+                size_of::<EagerCallInfo>() + arg.heap_size()
+            })
+        }
+        MacroCallKind::Derive {
+            ast_id: _,
+            derive_attr_index: _,
+            derive_index: _,
+            derive_macro_id: _,
+        } => 0,
+        MacroCallKind::Attr { ast_id: _, attr_args, censored_attr_ids } => {
+            attr_args.as_deref().map_or(0, |args| size_of::<tt::TopSubtree>() + args.heap_size())
+                + attr_ids(censored_attr_ids)
+        }
+    }
+}
+
+/// The `ThinVec` behind several censored attributes: its two-word header and
+/// the elements, by capacity. A single attribute is inline, and an empty
+/// `ThinVec` points at a shared static header and owns nothing.
+fn attr_ids(ids: &AttrMacroAttrIds) -> usize {
+    match &ids.0 {
+        AttrMacroAttrIdsRepr::One(_) => 0,
+        AttrMacroAttrIdsRepr::ManyDerives(ids) if ids.capacity() == 0 => 0,
+        AttrMacroAttrIdsRepr::ManyDerives(ids) => {
+            2 * size_of::<usize>() + ids.capacity() * size_of::<crate::attrs::AttrId>()
+        }
+    }
+}
+
+/// `heap_size` for the `real_span_map` query; see [`span::RealSpanMap::heap_size`].
+pub(crate) fn real_span_map(map: &span::RealSpanMap) -> usize {
+    map.heap_size()
+}
 
 /// `heap_size` for the `parse_macro_expansion` query.
 ///

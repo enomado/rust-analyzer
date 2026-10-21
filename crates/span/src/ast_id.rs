@@ -610,6 +610,19 @@ pub struct AstIdMap {
 
 type ArenaId = Idx<(SyntaxNodePtr, ErasedFileAstId)>;
 
+impl AstIdMap {
+    /// Bytes this map owns on the heap, for salsa's memory report (the
+    /// `heap_size` of `ast_id_map`). A lower bound like the rest of that family:
+    /// the arena is counted by length — `la-arena` does not expose capacity —
+    /// while both tables report their whole allocation, empty buckets included.
+    pub fn heap_size(&self) -> usize {
+        let AstIdMap { arena, ptr_map, id_map } = self;
+        arena.len() * size_of::<(SyntaxNodePtr, ErasedFileAstId)>()
+            + ptr_map.allocation_size()
+            + id_map.allocation_size()
+    }
+}
+
 impl fmt::Debug for AstIdMap {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("AstIdMap").field("arena", &self.arena).finish()

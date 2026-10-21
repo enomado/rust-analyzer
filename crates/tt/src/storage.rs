@@ -1079,6 +1079,16 @@ pub struct TopSubtree {
 }
 
 impl TopSubtree {
+    /// Bytes this token tree owns on the heap, for salsa's memory report: the
+    /// encoded buffer, the compressed span table and the symbol slots. The
+    /// symbols' text belongs to the `Symbol` interner and is counted there.
+    pub fn heap_size(&self) -> usize {
+        let TopSubtree { buffer, span_parts, symbols, len: _ } = self;
+        buffer.len()
+            + span_parts.len() * size_of::<CompressedSpanPart>()
+            + symbols.len() * size_of::<Symbol>()
+    }
+
     pub fn empty(span: DelimSpan) -> Self {
         encode_all(
             vec![TokenTree::Subtree(Subtree {

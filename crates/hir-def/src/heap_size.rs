@@ -89,10 +89,7 @@ pub fn arena_map<T, V>(map: &ArenaMap<Idx<T>, V>) -> usize {
 }
 
 /// [`arena_map`] for a map whose values own heap of their own.
-pub fn arena_map_with<T, V>(
-    map: &ArenaMap<Idx<T>, V>,
-    per_value: impl Fn(&V) -> usize,
-) -> usize {
+pub fn arena_map_with<T, V>(map: &ArenaMap<Idx<T>, V>, per_value: impl Fn(&V) -> usize) -> usize {
     map.values().map(|value| size_of::<Option<V>>() + per_value(value)).sum()
 }
 
@@ -129,10 +126,7 @@ pub fn index_map<K, V, S>(map: &IndexMap<K, V, S>) -> usize {
 }
 
 /// [`index_map`] for a map whose values own heap of their own.
-pub fn index_map_with<K, V, S>(
-    map: &IndexMap<K, V, S>,
-    per_value: impl Fn(&V) -> usize,
-) -> usize {
+pub fn index_map_with<K, V, S>(map: &IndexMap<K, V, S>, per_value: impl Fn(&V) -> usize) -> usize {
     index_map(map) + map.values().map(per_value).sum::<usize>()
 }
 
@@ -265,6 +259,47 @@ fn f() {
             "200 items inside the file's single top-level `mod` weighed no more than an empty one \
              ({empty_module} bytes): only `top_level` is reaching the total, and the assertion \
              above cannot tell"
+        );
+    }
+
+    /// `ast_id_map` and `macro_arg` (both in `hir-expand`) report a heap, and
+    /// it follows the input: more items grow the AST id map, a longer macro
+    /// argument grows its token tree. Read through salsa's own report, so the
+    /// `heap_size = …` wiring is under test along with the arithmetic.
+    #[test]
+    fn ast_id_maps_and_macro_args_are_weighed() {
+        fn heaps(#[rust_analyzer::rust_fixture] ra_fixture: &str) -> (usize, usize) {
+            let mut db = TestDB::with_files(ra_fixture);
+            // Collecting the def map lowers every item and expands every macro
+            // call, which is what fills both queries.
+            crate_def_map(&db, db.fetch_test_crate());
+            let usage = <dyn salsa::Database>::memory_usage(&mut db);
+            let heap = |query: &str| {
+                let info = &usage.queries[query];
+                assert!(info.count() > 0, "positive control: `{query}` has no memos at all");
+                info.heap_size_of_fields()
+                    .unwrap_or_else(|| panic!("`{query}` reports no heap size"))
+            };
+            (heap("HirFileId::ast_id_map_"), heap("MacroCallId::macro_arg_"))
+        }
+
+        let (small_map, small_arg) = heaps(
+            r#"
+//- /lib.rs
+macro_rules! m { ($($t:tt)*) => {} }
+m!(a);
+"#,
+        );
+        let (big_map, big_arg) = heaps(&format!(
+            "//- /lib.rs\nmacro_rules! m {{ ($($t:tt)*) => {{}} }}\nm!({});\n{}",
+            "a ".repeat(300),
+            (0..200).map(|i| format!("struct S{i};\n")).collect::<String>()
+        ));
+
+        assert!(big_map > small_map, "200 more items left the AST id maps at {small_map} bytes");
+        assert!(
+            big_arg > small_arg,
+            "a 300-token macro argument weighed no more than a 1-token one ({small_arg} bytes)"
         );
     }
 

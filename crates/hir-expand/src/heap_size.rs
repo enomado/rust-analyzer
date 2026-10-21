@@ -23,6 +23,18 @@ pub(crate) fn parse_macro_expansion(
     syntax::heap_size::parse(parse) + span_map_heap(span_map)
 }
 
+/// `heap_size` for the `macro_arg` query: the argument's token tree and the
+/// fixup undo info; the span is inline.
+pub(crate) fn macro_arg(value: &crate::MacroArgResult) -> usize {
+    let (tt, undo_info, _span) = value;
+    tt.heap_size() + undo_info.heap_size()
+}
+
+/// `heap_size` for the `ast_id_map` query; see [`span::AstIdMap::heap_size`].
+pub(crate) fn ast_id_map(map: &span::AstIdMap) -> usize {
+    map.heap_size()
+}
+
 /// The span vector, counted by its length: `SpanMap` keeps the entries private
 /// and exposes only an iterator, so spare capacity goes uncounted like every
 /// other over-allocation in this family.

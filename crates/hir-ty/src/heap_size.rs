@@ -21,7 +21,11 @@
 
 use hir_def::heap_size::{index_map_with, slice, small_vec, vec};
 
-use crate::infer::{ClosureData, InferenceResult};
+use crate::{
+    infer::{ClosureData, InferenceResult},
+    lower::TyLoweringResult,
+    next_solver::{StoredEarlyBinder, StoredTraitRef, StoredTy},
+};
 
 /// `heap_size` for [`InferenceResult::for_body`].
 ///
@@ -30,6 +34,26 @@ use crate::infer::{ClosureData, InferenceResult};
 /// the fields are declared is the one that a new field breaks loudly.
 pub(crate) fn inference_result(result: &InferenceResult<'_>) -> usize {
     result.heap_size()
+}
+
+/// `heap_size` for [`crate::lower::impl_trait_with_diagnostics`].
+///
+/// The trait ref itself is a `Stored*` handle: its generic args live in the
+/// solver's interners and are counted there, once. What this memo owns is the
+/// diagnostics box, usually absent — so on most impls this answers 0, and the
+/// memo's real cost is its stack and metadata in the same report row.
+pub(crate) fn impl_trait_lowering(
+    result: &Option<TyLoweringResult<'_, StoredEarlyBinder<StoredTraitRef>>>,
+) -> usize {
+    result.as_ref().map_or(0, TyLoweringResult::info_heap_size)
+}
+
+/// `heap_size` for [`crate::lower::impl_self_ty_with_diagnostics`]; the same
+/// split as [`impl_trait_lowering`].
+pub(crate) fn impl_self_ty_lowering(
+    result: &TyLoweringResult<'_, StoredEarlyBinder<StoredTy>>,
+) -> usize {
+    result.info_heap_size()
 }
 
 /// The containers a single closure's capture analysis owns.

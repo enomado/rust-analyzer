@@ -1426,6 +1426,19 @@ impl<T: std::fmt::Debug> std::fmt::Debug for TyLoweringResult<'_, T> {
 }
 
 impl<'db, T> TyLoweringResult<'db, T> {
+    /// Heap owned by the diagnostics side of the result, for salsa's memory
+    /// report. `value` is left to the caller, which knows its type: for the
+    /// impl-lowering queries it is a `Stored*` handle into the solver's
+    /// interners and owns nothing here. A result without diagnostics or anon
+    /// consts — the common case — has no box at all.
+    pub(crate) fn info_heap_size(&self) -> usize {
+        let TyLoweringResult { value: _, info } = self;
+        hir_def::heap_size::boxed(info, |info| {
+            let TyLoweringResultInfo { diagnostics, anon_consts } = info;
+            hir_def::heap_size::thin_vec(diagnostics) + hir_def::heap_size::thin_vec(anon_consts)
+        })
+    }
+
     fn new(
         value: T,
         mut diagnostics: ThinVec<TyLoweringDiagnostic>,
@@ -1497,7 +1510,11 @@ pub(crate) fn impl_trait_query<'db>(
         .map(|it| it.value.get(DbInterner::new_no_crate(db)))
 }
 
-#[salsa::tracked(returns(ref), cycle_result = impl_trait_with_diagnostics_cycle_result)]
+#[salsa::tracked(
+    returns(ref),
+    cycle_result = impl_trait_with_diagnostics_cycle_result,
+    heap_size = crate::heap_size::impl_trait_lowering
+)]
 pub(crate) fn impl_trait_with_diagnostics<'db>(
     db: &'db dyn HirDatabase,
     impl_id: ImplId,
@@ -1829,7 +1846,11 @@ pub(crate) fn impl_self_ty_query<'db>(
     impl_self_ty_with_diagnostics(db, impl_id).value.get()
 }
 
-#[salsa::tracked(returns(ref), cycle_result = impl_self_ty_with_diagnostics_cycle_result)]
+#[salsa::tracked(
+    returns(ref),
+    cycle_result = impl_self_ty_with_diagnostics_cycle_result,
+    heap_size = crate::heap_size::impl_self_ty_lowering
+)]
 pub(crate) fn impl_self_ty_with_diagnostics<'db>(
     db: &'db dyn HirDatabase,
     impl_id: ImplId,

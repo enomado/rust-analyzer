@@ -537,7 +537,7 @@ impl MacroCallId {
     /// Lowers syntactic macro call to a token tree representation. That's a firewall
     /// query, only typing in the macro call itself changes the returned
     /// subtree.
-    #[salsa::tracked(returns(ref))]
+    #[salsa::tracked(returns(ref), heap_size = crate::heap_size::macro_arg)]
     #[deprecated = "calling this is incorrect, call `macro_arg_considering_derives` instead"]
     fn macro_arg(self, db: &dyn SourceDatabase) -> MacroArgResult {
         let loc = self.loc(db);
@@ -1752,7 +1752,7 @@ impl HirFileId {
 
 #[salsa::tracked]
 impl HirFileId {
-    #[salsa::tracked(lru = 1024, returns(ref))]
+    #[salsa::tracked(lru = 1024, returns(ref), heap_size = crate::heap_size::ast_id_map)]
     pub fn ast_id_map(self, db: &dyn SourceDatabase) -> AstIdMap {
         AstIdMap::from_source(&self.parse_or_expand(db))
     }

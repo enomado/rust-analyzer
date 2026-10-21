@@ -40,6 +40,16 @@ pub struct SyntaxFixupUndoInfo {
 
 impl SyntaxFixupUndoInfo {
     pub(crate) const NONE: Self = SyntaxFixupUndoInfo { original: None };
+
+    /// The saved originals: the `ThinVec`'s slots (header aside) plus each
+    /// token tree's own buffers. `None` — the common case — owns nothing.
+    pub(crate) fn heap_size(&self) -> usize {
+        let SyntaxFixupUndoInfo { original } = self;
+        original.as_ref().map_or(0, |original| {
+            original.capacity() * size_of::<tt::TopSubtree>()
+                + original.iter().map(tt::TopSubtree::heap_size).sum::<usize>()
+        })
+    }
 }
 
 // We mark spans with `FIXUP_DUMMY_AST_ID` to indicate that they are fake.

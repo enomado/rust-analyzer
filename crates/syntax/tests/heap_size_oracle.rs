@@ -4,16 +4,11 @@
 //! `heap_size::parse` computes the size of every allocation of a parse from
 //! rowan's layout arithmetic. That layout is rowan's private business, so the
 //! number is only trustworthy while something checks it against reality. This
-//! binary installs a global allocator that keeps a running total of requested
-//! bytes; parsing a file and holding the result moves that total by exactly
-//! what the parse owns, because everything else the parser allocated (the
-//! builder, its node cache, the lexer's buffers) is freed by the time it
-//! returns.
-//!
-//! An integration test and not a unit test, because the global allocator is
-//! per binary: here it observes nothing but this file. There is one `#[test]`
-//! for the same reason — two tests on two threads would see each other's
-//! allocations in the shared total.
+//! binary runs under `test_utils::counting_alloc`, which keeps a running total
+//! of requested bytes; parsing a file and holding the result moves that total
+//! by exactly what the parse owns, because everything else the parser
+//! allocated (the builder, its node cache, the lexer's buffers) is freed by
+//! the time it returns. One `#[test]`, for the reason given there.
 //!
 //! 🚨 No parse may be dropped while the test runs. `Parse` drops its tree on a
 //! background thread (`ParseNodeDropper`, `lib.rs`), so a tree dropped before a
@@ -22,58 +17,18 @@
 //! file was parsed again, and the two cancelled to a delta of 0. Every parse
 //! is kept alive until the end instead.
 
-use std::alloc::{GlobalAlloc, Layout, System};
-use std::sync::atomic::{AtomicIsize, Ordering};
-
 use syntax::{Edition, Parse, SourceFile};
-
-/// Requested bytes currently allocated, process-wide.
-static LIVE: AtomicIsize = AtomicIsize::new(0);
-
-struct Counting;
-
-// SAFETY: every call is forwarded to `System` unchanged; the counter only
-// observes sizes.
-unsafe impl GlobalAlloc for Counting {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let ptr = unsafe { System.alloc(layout) };
-        if !ptr.is_null() {
-            LIVE.fetch_add(layout.size() as isize, Ordering::Relaxed);
-        }
-        ptr
-    }
-
-    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        let ptr = unsafe { System.alloc_zeroed(layout) };
-        if !ptr.is_null() {
-            LIVE.fetch_add(layout.size() as isize, Ordering::Relaxed);
-        }
-        ptr
-    }
-
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        unsafe { System.dealloc(ptr, layout) };
-        LIVE.fetch_sub(layout.size() as isize, Ordering::Relaxed);
-    }
-
-    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        let new = unsafe { System.realloc(ptr, layout, new_size) };
-        if !new.is_null() {
-            LIVE.fetch_add(new_size as isize - layout.size() as isize, Ordering::Relaxed);
-        }
-        new
-    }
-}
+use test_utils::counting_alloc::{CountingAllocator, live_bytes};
 
 #[global_allocator]
-static ALLOCATOR: Counting = Counting;
+static ALLOCATOR: CountingAllocator = CountingAllocator;
 
 /// Parses `text` and returns the parse with the live bytes it added. The
 /// caller keeps the parse alive; see the module comment.
 fn parse_measured(text: &str) -> (Parse<SourceFile>, isize) {
-    let before = LIVE.load(Ordering::Relaxed);
+    let before = live_bytes();
     let parse = SourceFile::parse(text, Edition::CURRENT);
-    (parse, LIVE.load(Ordering::Relaxed) - before)
+    (parse, live_bytes() - before)
 }
 
 #[test]

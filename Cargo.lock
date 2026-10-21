@@ -100,6 +100,7 @@ dependencies = [
  "semver",
  "span",
  "syntax",
+ "test-utils",
  "tracing",
  "triomphe",
  "vfs",

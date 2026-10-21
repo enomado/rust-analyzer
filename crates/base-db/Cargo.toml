@@ -29,6 +29,9 @@ vfs.workspace = true
 span.workspace = true
 intern.workspace = true
 
+[dev-dependencies]
+test-utils.workspace = true
+
 [features]
 default = []
 in-rust-tree = []

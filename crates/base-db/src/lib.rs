@@ -214,11 +214,22 @@ pub struct LocalRoots {
     pub roots: FxHashSet<SourceRootId>,
 }
 
-#[salsa::input(debug)]
+#[salsa::input(debug, heap_size = file_text_heap_size)]
 pub struct FileText {
     #[returns(ref)]
     pub text: Arc<str>,
     pub file_id: vfs::FileId,
+}
+
+/// `heap_size` for [`FileText`]: the text's `triomphe::Arc<str>` — the
+/// reference count, then the bytes, padded to the count's alignment.
+///
+/// The input is the text's one owner: every setter in `Files` builds a fresh
+/// `Arc::from(text)`, and readers borrow it (`returns(ref)`), so a clone a
+/// query makes is charged here once. Checked against the allocator by
+/// `tests/heap_size_oracle.rs`.
+pub fn file_text_heap_size((text, _file_id): &(Arc<str>, vfs::FileId)) -> usize {
+    (std::mem::size_of::<usize>() + text.len()).next_multiple_of(std::mem::align_of::<usize>())
 }
 
 #[salsa::input(debug)]

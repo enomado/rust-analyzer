@@ -133,6 +133,39 @@ const _: () = assert!(align_of::<Symbol>() == align_of::<NonNull<()>>());
 type Map = DashMap<Symbol, (), BuildHasherDefault<FxHasher>>;
 static MAP: OnceLock<Map> = OnceLock::new();
 
+/// `Symbol`'s row of [`crate::interner_memory`].
+///
+/// A runtime symbol is an `Arc<Box<str>>`: the `Arc` allocation holds the
+/// refcount and the box, the box points at the text. Prefilled symbols are
+/// `&'static &'static str` and allocate nothing beyond their table slot.
+///
+/// Uses `get_or_init` unlike the generic storages: the prefill is the map's
+/// permanent floor, there is no "untouched" state worth distinguishing.
+pub(crate) fn memory() -> crate::InternerMemory {
+    let map = MAP.get_or_init(symbols::prefill);
+    let mut count = 0;
+    let mut value_bytes = 0;
+    for shard in map.shards() {
+        let shard = shard.read();
+        // SAFETY: the read lock is held for as long as the iterator lives.
+        for bucket in unsafe { shard.iter() } {
+            // SAFETY: a bucket yielded by `iter` is occupied.
+            let symbol = unsafe { &bucket.as_ref().0 };
+            count += 1;
+            if symbol.repr.is_arc() {
+                value_bytes += crate::stats::arc_allocation::<Box<str>>() + symbol.as_str().len();
+            }
+        }
+    }
+    crate::InternerMemory {
+        name: std::any::type_name::<Symbol>(),
+        gc: false,
+        count,
+        table_bytes: crate::stats::table_bytes(map),
+        value_bytes,
+    }
+}
+
 impl Symbol {
     pub fn intern(s: &str) -> Self {
         let storage = MAP.get_or_init(symbols::prefill);
@@ -307,5 +340,23 @@ mod tests {
         drop(world);
         drop(bang);
         assert_eq!(MAP.get().unwrap().len(), base_len);
+
+        // Runtime symbols cost their text; static ones only their slot. Here
+        // rather than in a test of its own because the asserts above count the
+        // map exactly and would see another test's symbols.
+        let before = memory();
+        assert_eq!(before.count, base_len);
+        let text = "a_symbol_no_prefill_contains_".repeat(8);
+        let held: Vec<_> = (0..100).map(|i| Symbol::intern(&format!("{text}{i}"))).collect();
+        let after = memory();
+        assert_eq!(after.count, base_len + 100);
+        assert!(
+            after.value_bytes >= before.value_bytes + 100 * text.len(),
+            "100 symbols of {} bytes each added only {} bytes",
+            text.len(),
+            after.value_bytes - before.value_bytes
+        );
+        drop(held);
+        assert_eq!(memory().value_bytes, before.value_bytes);
     }
 }

@@ -293,10 +293,43 @@ impl<T: SliceInternable> InternSliceStorage<T> {
 impl<T: SliceInternable> InternSliceStorage<T> {
     pub(crate) fn get(&self) -> &InternMap<T> {
         self.map.get_or_init(|| {
+            // See `InternStorage::get`: `self` is `T::storage()`.
+            crate::stats::register(T::storage());
             DashMap::with_capacity_and_hasher(
                 (64 * 1024) / std::mem::size_of::<T::SliceType>(),
                 Default::default(),
             )
+        })
+    }
+}
+
+impl<T: SliceInternable> crate::stats::MeasuredStorage for InternSliceStorage<T> {
+    /// Slices differ in length, so each entry is weighed on its own: the
+    /// `ThinArc` allocation is refcount, header with length, then the slice.
+    fn measure(&'static self) -> Option<crate::InternerMemory> {
+        let map = self.map.get()?;
+        let mut count = 0;
+        let mut value_bytes = 0;
+        for shard in map.shards() {
+            let shard = shard.read();
+            // SAFETY: the read lock is held for as long as the iterator lives.
+            for bucket in unsafe { shard.iter() } {
+                // SAFETY: a bucket yielded by `iter` is occupied.
+                let len = unsafe { bucket.as_ref().0.slice.len() };
+                let payload = std::alloc::Layout::new::<HeaderWithLength<T::Header>>()
+                    .extend(std::alloc::Layout::array::<T::SliceType>(len).unwrap())
+                    .unwrap()
+                    .0;
+                count += 1;
+                value_bytes += crate::stats::arc_allocation_of(payload);
+            }
+        }
+        Some(crate::InternerMemory {
+            name: std::any::type_name::<T>(),
+            gc: T::USE_GC,
+            count,
+            table_bytes: crate::stats::table_bytes(map),
+            value_bytes,
         })
     }
 }

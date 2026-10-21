@@ -5,6 +5,7 @@
 mod gc;
 mod intern;
 mod intern_slice;
+mod stats;
 mod symbol;
 
 pub use self::gc::{GarbageCollector, GcInternedSliceVisit, GcInternedVisit};
@@ -12,4 +13,5 @@ pub use self::intern::{InternStorage, Internable, Interned, InternedRef, impl_in
 pub use self::intern_slice::{
     InternSliceStorage, InternedSlice, InternedSliceRef, SliceInternable, impl_slice_internable,
 };
+pub use self::stats::{InternerMemory, interner_memory};
 pub use self::symbol::{Symbol, symbols as sym};

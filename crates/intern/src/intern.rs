@@ -332,9 +332,28 @@ impl<T: ?Sized> InternStorage<T> {
     }
 }
 
-impl<T: Internable + ?Sized> InternStorage<T> {
+impl<T: Internable> InternStorage<T> {
     pub(crate) fn get(&self) -> &InternMap<T> {
-        self.map.get_or_init(|| DashMap::with_capacity_and_hasher(1024, Default::default()))
+        self.map.get_or_init(|| {
+            // `self` is `T::storage()` by construction; the registry needs the
+            // `'static` handle, which only `storage()` can name.
+            crate::stats::register(T::storage());
+            DashMap::with_capacity_and_hasher(1024, Default::default())
+        })
+    }
+}
+
+impl<T: Internable> crate::stats::MeasuredStorage for InternStorage<T> {
+    fn measure(&'static self) -> Option<crate::InternerMemory> {
+        let map = self.map.get()?;
+        let count = map.len();
+        Some(crate::InternerMemory {
+            name: std::any::type_name::<T>(),
+            gc: T::USE_GC,
+            count,
+            table_bytes: crate::stats::table_bytes(map),
+            value_bytes: count * crate::stats::arc_allocation::<T>(),
+        })
     }
 }
 

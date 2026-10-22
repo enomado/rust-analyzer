@@ -33,6 +33,7 @@ use crate::{
     project_json::{Crate, CrateArrayIdx},
     sysroot::RustLibSrcWorkspace,
     toolchain_info::{QueryConfig, rustc_cfg, target_data, target_tuple, version},
+    unbuilt_optional_deps::drop_unbuilt_optional_deps,
     utf8_stdout,
 };
 
@@ -438,11 +439,12 @@ impl ProjectWorkspace {
             }
         }
 
-        let (meta, error) = cargo_metadata.with_context(|| {
+        let (mut meta, error) = cargo_metadata.with_context(|| {
             format!(
                 "Failed to read Cargo metadata from Cargo.toml file {cargo_toml}, {toolchain:?}",
             )
         })?;
+        drop_unbuilt_unless_asked(&mut meta, config, cargo_toml);
         let cargo = CargoWorkspace::new(meta, cargo_toml.clone(), cargo_env, false);
         if let Some(loaded_sysroot) = loaded_sysroot {
             tracing::info!(src_root = ?sysroot.rust_lib_src_root(), root = %loaded_sysroot, "Loaded sysroot");
@@ -607,7 +609,8 @@ impl ProjectWorkspace {
             &sysroot,
             config.no_deps,
         );
-        let cargo_script = fetch_metadata.exec(false, &|_| ()).ok().map(|(ws, error)| {
+        let cargo_script = fetch_metadata.exec(false, &|_| ()).ok().map(|(mut ws, error)| {
+            drop_unbuilt_unless_asked(&mut ws, config, detached_file);
             let cargo_config_extra_env = cargo_config_env(&config_file, &config.extra_env);
             (
                 CargoWorkspace::new(ws, detached_file.clone(), cargo_config_extra_env, false),
@@ -1962,6 +1965,26 @@ fn add_dep_inner(graph: &mut CrateGraphBuilder, from: CrateBuilderId, dep: Depen
     if let Err(err) = graph.add_dep(from, dep) {
         tracing::warn!("{}", err)
     }
+}
+
+/// Drop the optional dependencies cargo never builds (see [`drop_unbuilt_optional_deps`]) from
+/// the metadata of the workspace itself, unless `load_weak_only_optional_deps` asks to keep
+/// them. The sysroot and rustc-dev workspaces are loaded as they come.
+fn drop_unbuilt_unless_asked(
+    meta: &mut cargo_metadata::Metadata,
+    config: &CargoConfig,
+    manifest: &ManifestPath,
+) {
+    if config.load_weak_only_optional_deps {
+        return;
+    }
+    let dropped = drop_unbuilt_optional_deps(meta);
+    info!(
+        %manifest,
+        edges = dropped.edges,
+        packages = dropped.packages,
+        "dropped optional dependencies cargo does not build"
+    );
 }
 
 fn sysroot_metadata_config(

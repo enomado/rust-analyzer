@@ -145,6 +145,9 @@ pub struct CargoConfig {
     pub set_test: bool,
     /// Load the project without any dependencies
     pub no_deps: bool,
+    /// Also load optional dependencies that `cargo metadata` lists but cargo never builds:
+    /// the ones only weak `dep?/feat` features refer to. Off by default, like cargo.
+    pub load_weak_only_optional_deps: bool,
 }
 
 pub type Package = Idx<PackageData>;

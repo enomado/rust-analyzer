@@ -2494,6 +2494,7 @@ impl Config {
             no_deps: *self.cargo_noDeps(source_root),
             metadata_extra_args: self.cargo_metadataExtraArgs(source_root).clone(),
             config_path,
+            load_weak_only_optional_deps: false,
         }
     }
 

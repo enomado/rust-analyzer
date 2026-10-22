@@ -1,0 +1,506 @@
+{
+    "packages": [
+        {
+            "name": "app",
+            "version": "0.1.0",
+            "id": "path+file://$ROOT$ws/app#0.1.0",
+            "license": null,
+            "license_file": null,
+            "description": null,
+            "source": null,
+            "dependencies": [
+                {
+                    "name": "facade",
+                    "source": null,
+                    "req": "*",
+                    "kind": null,
+                    "rename": null,
+                    "optional": false,
+                    "uses_default_features": true,
+                    "features": [],
+                    "target": null,
+                    "registry": null,
+                    "path": "$ROOT$deps/facade"
+                },
+                {
+                    "name": "shared",
+                    "source": null,
+                    "req": "*",
+                    "kind": null,
+                    "rename": null,
+                    "optional": false,
+                    "uses_default_features": true,
+                    "features": [],
+                    "target": null,
+                    "registry": null,
+                    "path": "$ROOT$deps/shared"
+                }
+            ],
+            "targets": [
+                {
+                    "kind": [
+                        "lib"
+                    ],
+                    "crate_types": [
+                        "lib"
+                    ],
+                    "name": "app",
+                    "src_path": "$ROOT$ws/app/src/lib.rs",
+                    "edition": "2021",
+                    "doc": true,
+                    "doctest": true,
+                    "test": true
+                }
+            ],
+            "features": {},
+            "manifest_path": "$ROOT$ws/app/Cargo.toml",
+            "metadata": null,
+            "publish": null,
+            "authors": [],
+            "categories": [],
+            "keywords": [],
+            "readme": null,
+            "repository": null,
+            "homepage": null,
+            "documentation": null,
+            "edition": "2021",
+            "links": null,
+            "default_run": null,
+            "rust_version": null
+        },
+        {
+            "name": "facade",
+            "version": "0.1.0",
+            "id": "path+file://$ROOT$deps/facade#0.1.0",
+            "license": null,
+            "license_file": null,
+            "description": null,
+            "source": null,
+            "dependencies": [
+                {
+                    "name": "renamed",
+                    "source": null,
+                    "req": "*",
+                    "kind": null,
+                    "rename": "renamed_new",
+                    "optional": true,
+                    "uses_default_features": true,
+                    "features": [],
+                    "target": null,
+                    "registry": null,
+                    "path": "$ROOT$deps/renamed"
+                },
+                {
+                    "name": "shared",
+                    "source": null,
+                    "req": "*",
+                    "kind": null,
+                    "rename": null,
+                    "optional": true,
+                    "uses_default_features": true,
+                    "features": [],
+                    "target": null,
+                    "registry": null,
+                    "path": "$ROOT$deps/shared"
+                },
+                {
+                    "name": "strong",
+                    "source": null,
+                    "req": "*",
+                    "kind": null,
+                    "rename": null,
+                    "optional": true,
+                    "uses_default_features": true,
+                    "features": [],
+                    "target": null,
+                    "registry": null,
+                    "path": "$ROOT$deps/strong"
+                },
+                {
+                    "name": "weak_only",
+                    "source": null,
+                    "req": "*",
+                    "kind": null,
+                    "rename": null,
+                    "optional": true,
+                    "uses_default_features": true,
+                    "features": [],
+                    "target": null,
+                    "registry": null,
+                    "path": "$ROOT$deps/weak_only"
+                },
+                {
+                    "name": "weak_only",
+                    "source": null,
+                    "req": "*",
+                    "kind": "dev",
+                    "rename": null,
+                    "optional": false,
+                    "uses_default_features": true,
+                    "features": [],
+                    "target": null,
+                    "registry": null,
+                    "path": "$ROOT$deps/weak_only"
+                }
+            ],
+            "targets": [
+                {
+                    "kind": [
+                        "lib"
+                    ],
+                    "crate_types": [
+                        "lib"
+                    ],
+                    "name": "facade",
+                    "src_path": "$ROOT$deps/facade/src/lib.rs",
+                    "edition": "2021",
+                    "doc": true,
+                    "doctest": true,
+                    "test": true
+                }
+            ],
+            "features": {
+                "default": [
+                    "std",
+                    "extra"
+                ],
+                "extra": [
+                    "dep:renamed_new"
+                ],
+                "shared": [
+                    "dep:shared"
+                ],
+                "std": [
+                    "weak_only?/std",
+                    "strong/std",
+                    "shared?/std"
+                ],
+                "strong": [
+                    "dep:strong"
+                ],
+                "weak_only": [
+                    "dep:weak_only"
+                ]
+            },
+            "manifest_path": "$ROOT$deps/facade/Cargo.toml",
+            "metadata": null,
+            "publish": null,
+            "authors": [],
+            "categories": [],
+            "keywords": [],
+            "readme": null,
+            "repository": null,
+            "homepage": null,
+            "documentation": null,
+            "edition": "2021",
+            "links": null,
+            "default_run": null,
+            "rust_version": null
+        },
+        {
+            "name": "renamed",
+            "version": "0.1.0",
+            "id": "path+file://$ROOT$deps/renamed#0.1.0",
+            "license": null,
+            "license_file": null,
+            "description": null,
+            "source": null,
+            "dependencies": [],
+            "targets": [
+                {
+                    "kind": [
+                        "lib"
+                    ],
+                    "crate_types": [
+                        "lib"
+                    ],
+                    "name": "renamed",
+                    "src_path": "$ROOT$deps/renamed/src/lib.rs",
+                    "edition": "2021",
+                    "doc": true,
+                    "doctest": true,
+                    "test": true
+                }
+            ],
+            "features": {
+                "std": []
+            },
+            "manifest_path": "$ROOT$deps/renamed/Cargo.toml",
+            "metadata": null,
+            "publish": null,
+            "authors": [],
+            "categories": [],
+            "keywords": [],
+            "readme": null,
+            "repository": null,
+            "homepage": null,
+            "documentation": null,
+            "edition": "2021",
+            "links": null,
+            "default_run": null,
+            "rust_version": null
+        },
+        {
+            "name": "shared",
+            "version": "0.1.0",
+            "id": "path+file://$ROOT$deps/shared#0.1.0",
+            "license": null,
+            "license_file": null,
+            "description": null,
+            "source": null,
+            "dependencies": [],
+            "targets": [
+                {
+                    "kind": [
+                        "lib"
+                    ],
+                    "crate_types": [
+                        "lib"
+                    ],
+                    "name": "shared",
+                    "src_path": "$ROOT$deps/shared/src/lib.rs",
+                    "edition": "2021",
+                    "doc": true,
+                    "doctest": true,
+                    "test": true
+                }
+            ],
+            "features": {
+                "std": []
+            },
+            "manifest_path": "$ROOT$deps/shared/Cargo.toml",
+            "metadata": null,
+            "publish": null,
+            "authors": [],
+            "categories": [],
+            "keywords": [],
+            "readme": null,
+            "repository": null,
+            "homepage": null,
+            "documentation": null,
+            "edition": "2021",
+            "links": null,
+            "default_run": null,
+            "rust_version": null
+        },
+        {
+            "name": "strong",
+            "version": "0.1.0",
+            "id": "path+file://$ROOT$deps/strong#0.1.0",
+            "license": null,
+            "license_file": null,
+            "description": null,
+            "source": null,
+            "dependencies": [],
+            "targets": [
+                {
+                    "kind": [
+                        "lib"
+                    ],
+                    "crate_types": [
+                        "lib"
+                    ],
+                    "name": "strong",
+                    "src_path": "$ROOT$deps/strong/src/lib.rs",
+                    "edition": "2021",
+                    "doc": true,
+                    "doctest": true,
+                    "test": true
+                }
+            ],
+            "features": {
+                "std": []
+            },
+            "manifest_path": "$ROOT$deps/strong/Cargo.toml",
+            "metadata": null,
+            "publish": null,
+            "authors": [],
+            "categories": [],
+            "keywords": [],
+            "readme": null,
+            "repository": null,
+            "homepage": null,
+            "documentation": null,
+            "edition": "2021",
+            "links": null,
+            "default_run": null,
+            "rust_version": null
+        },
+        {
+            "name": "weak_only",
+            "version": "0.1.0",
+            "id": "path+file://$ROOT$deps/weak_only#0.1.0",
+            "license": null,
+            "license_file": null,
+            "description": null,
+            "source": null,
+            "dependencies": [],
+            "targets": [
+                {
+                    "kind": [
+                        "lib"
+                    ],
+                    "crate_types": [
+                        "lib"
+                    ],
+                    "name": "weak_only",
+                    "src_path": "$ROOT$deps/weak_only/src/lib.rs",
+                    "edition": "2021",
+                    "doc": true,
+                    "doctest": true,
+                    "test": true
+                }
+            ],
+            "features": {
+                "std": []
+            },
+            "manifest_path": "$ROOT$deps/weak_only/Cargo.toml",
+            "metadata": null,
+            "publish": null,
+            "authors": [],
+            "categories": [],
+            "keywords": [],
+            "readme": null,
+            "repository": null,
+            "homepage": null,
+            "documentation": null,
+            "edition": "2021",
+            "links": null,
+            "default_run": null,
+            "rust_version": null
+        }
+    ],
+    "workspace_members": [
+        "path+file://$ROOT$ws/app#0.1.0"
+    ],
+    "workspace_default_members": [
+        "path+file://$ROOT$ws/app#0.1.0"
+    ],
+    "resolve": {
+        "nodes": [
+            {
+                "id": "path+file://$ROOT$ws/app#0.1.0",
+                "dependencies": [
+                    "path+file://$ROOT$deps/facade#0.1.0",
+                    "path+file://$ROOT$deps/shared#0.1.0"
+                ],
+                "deps": [
+                    {
+                        "name": "facade",
+                        "pkg": "path+file://$ROOT$deps/facade#0.1.0",
+                        "dep_kinds": [
+                            {
+                                "kind": null,
+                                "target": null
+                            }
+                        ]
+                    },
+                    {
+                        "name": "shared",
+                        "pkg": "path+file://$ROOT$deps/shared#0.1.0",
+                        "dep_kinds": [
+                            {
+                                "kind": null,
+                                "target": null
+                            }
+                        ]
+                    }
+                ],
+                "features": []
+            },
+            {
+                "id": "path+file://$ROOT$deps/facade#0.1.0",
+                "dependencies": [
+                    "path+file://$ROOT$deps/renamed#0.1.0",
+                    "path+file://$ROOT$deps/shared#0.1.0",
+                    "path+file://$ROOT$deps/strong#0.1.0",
+                    "path+file://$ROOT$deps/weak_only#0.1.0"
+                ],
+                "deps": [
+                    {
+                        "name": "renamed_new",
+                        "pkg": "path+file://$ROOT$deps/renamed#0.1.0",
+                        "dep_kinds": [
+                            {
+                                "kind": null,
+                                "target": null
+                            }
+                        ]
+                    },
+                    {
+                        "name": "shared",
+                        "pkg": "path+file://$ROOT$deps/shared#0.1.0",
+                        "dep_kinds": [
+                            {
+                                "kind": null,
+                                "target": null
+                            }
+                        ]
+                    },
+                    {
+                        "name": "strong",
+                        "pkg": "path+file://$ROOT$deps/strong#0.1.0",
+                        "dep_kinds": [
+                            {
+                                "kind": null,
+                                "target": null
+                            }
+                        ]
+                    },
+                    {
+                        "name": "weak_only",
+                        "pkg": "path+file://$ROOT$deps/weak_only#0.1.0",
+                        "dep_kinds": [
+                            {
+                                "kind": null,
+                                "target": null
+                            }
+                        ]
+                    }
+                ],
+                "features": [
+                    "default",
+                    "extra",
+                    "std",
+                    "strong"
+                ]
+            },
+            {
+                "id": "path+file://$ROOT$deps/renamed#0.1.0",
+                "dependencies": [],
+                "deps": [],
+                "features": []
+            },
+            {
+                "id": "path+file://$ROOT$deps/shared#0.1.0",
+                "dependencies": [],
+                "deps": [],
+                "features": [
+                    "std"
+                ]
+            },
+            {
+                "id": "path+file://$ROOT$deps/strong#0.1.0",
+                "dependencies": [],
+                "deps": [],
+                "features": [
+                    "std"
+                ]
+            },
+            {
+                "id": "path+file://$ROOT$deps/weak_only#0.1.0",
+                "dependencies": [],
+                "deps": [],
+                "features": [
+                    "std"
+                ]
+            }
+        ],
+        "root": null
+    },
+    "target_directory": "$ROOT$ws/target",
+    "build_directory": "$ROOT$ws/target",
+    "version": 1,
+    "workspace_root": "$ROOT$ws",
+    "metadata": null
+}

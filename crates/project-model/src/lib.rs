@@ -49,6 +49,7 @@ mod cargo_workspace;
 mod env;
 mod manifest_path;
 mod sysroot;
+mod unbuilt_optional_deps;
 mod workspace;
 
 #[cfg(test)]

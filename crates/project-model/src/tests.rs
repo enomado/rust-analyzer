@@ -288,3 +288,50 @@ fn smoke_test_real_sysroot_cargo() {
         &Default::default(),
     );
 }
+
+/// The fixture is `cargo metadata` of a workspace whose member `app` depends on `facade` and
+/// `shared`; `facade` has four optional dependencies, enabled by its default features as
+/// `weak_only?/std`, `strong/std`, `shared?/std` and `dep:renamed_new`; `weak_only` is also a
+/// required dev-dependency of `facade`, which a non-member never resolves. `cargo tree` of that
+/// workspace shows `facade → renamed, strong` and `app → facade, shared`: the two weak edges are
+/// in the metadata only, and `weak_only` is reached by nothing else.
+#[test]
+fn weak_only_optional_deps_are_not_loaded() {
+    use crate::unbuilt_optional_deps::{DroppedUnbuilt, drop_unbuilt_optional_deps};
+
+    fn deps_of(meta: &Metadata, pkg: &str) -> Vec<String> {
+        let id = &meta.packages.iter().find(|it| it.name.as_str() == pkg).unwrap().id;
+        let node = meta.resolve.as_ref().unwrap().nodes.iter().find(|it| &it.id == id).unwrap();
+        let mut names: Vec<String> = node.deps.iter().map(|it| it.name.clone()).collect();
+        names.sort();
+        names
+    }
+    fn package_names(meta: &Metadata) -> Vec<String> {
+        let mut names: Vec<String> = meta.packages.iter().map(|it| it.name.to_string()).collect();
+        names.sort();
+        names
+    }
+
+    let mut meta: Metadata = get_test_json_file("weak-optional-deps-metadata.json");
+    // What cargo metadata says, so the test is not vacuous.
+    assert_eq!(deps_of(&meta, "facade"), ["renamed_new", "shared", "strong", "weak_only"]);
+    assert_eq!(package_names(&meta).len(), 6);
+
+    let dropped = drop_unbuilt_optional_deps(&mut meta);
+
+    assert_eq!(dropped, DroppedUnbuilt { edges: 2, packages: 1 });
+    assert_eq!(deps_of(&meta, "facade"), ["renamed_new", "strong"]);
+    assert_eq!(deps_of(&meta, "app"), ["facade", "shared"]);
+    assert_eq!(package_names(&meta), ["app", "facade", "renamed", "shared", "strong"]);
+    for node in &meta.resolve.as_ref().unwrap().nodes {
+        assert_eq!(node.dependencies.len(), node.deps.len(), "{}", node.id);
+    }
+
+    // And the crate graph built from it has no crate for `weak_only`.
+    let manifest_path =
+        ManifestPath::try_from(AbsPathBuf::try_from(meta.workspace_root.clone()).unwrap()).unwrap();
+    let cargo = CargoWorkspace::new(meta, manifest_path, Default::default(), false);
+    let names: Vec<&str> = cargo.packages().map(|pkg| cargo[pkg].name.as_str()).collect();
+    assert!(!names.contains(&"weak_only"), "{names:?}");
+    assert_eq!(names.len(), 5);
+}

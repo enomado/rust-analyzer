@@ -22,13 +22,25 @@
 //! alternative — a match over every HIR variant — would go stale on the next
 //! upstream change with nothing to notice it had.
 //!
-//! # Why only the producing query is instrumented
+//! # Which query pays for the shared `Arc`
 //!
 //! [`Body::of`] hands out a clone of the very `Arc<Body>` that
-//! [`Body::with_source_map`] built. Instrumenting both would count that body
-//! twice and quietly inflate the total, so only the producer reports and
-//! `Body::of` keeps answering `None` ("not measured") rather than `Some(0)`
-//! ("measured, empty").
+//! [`Body::with_source_map`] built, and every `XSignature::of` does the same
+//! with its signature. Charging both memos would count one allocation twice,
+//! so exactly one of them pays — and it has to be `of`.
+//!
+//! The producer is the query with an `lru`: once it is evicted its value is
+//! gone, while `of` (never capped) keeps the very same `Arc` alive. A producer
+//! that charged for the object would therefore make every evicted body vanish
+//! from the report while its bytes stayed resident — which is exactly what the
+//! report showed before (67 532 bodies held by `Body::of`, 10 MB charged to the
+//! 512 the producer still had; see bur's `RA_MEMORY_MISREPORTS.md`, № 16).
+//!
+//! So `of` charges the object, the `Arc` block included, and the producer
+//! charges its source map — plus the object only while it is the `Arc`'s
+//! sole holder, i.e. before `of` ran or after `of` was collected. A third
+//! holder elsewhere makes the object go uncounted, never counted twice: lower
+//! bound, as everywhere in this module.
 
 use triomphe::Arc;
 
@@ -51,10 +63,16 @@ use crate::{
     },
 };
 
-/// `heap_size` for [`Body::with_source_map`].
+/// `heap_size` for [`Body::with_source_map`]: the source map, and the body
+/// only while nothing else holds it (see the module docs).
 pub(crate) fn body_with_source_map(value: &(Arc<Body>, BodySourceMap)) -> usize {
     let (body, source_map) = value;
-    body_heap(body) + source_map_heap(source_map)
+    source_map_heap(source_map) + sole_holder(body, body_heap)
+}
+
+/// `heap_size` for [`Body::of`]: the body, `Arc` block included.
+pub(crate) fn body_of(body: &Arc<Body>) -> usize {
+    arc(body, body_heap)
 }
 
 /// `heap_size` for every `XSignature::with_source_map`. They all return the
@@ -64,7 +82,24 @@ pub(crate) fn signature_with_source_map<T: SignatureHeap>(
     value: &(Arc<T>, ExpressionStoreSourceMap),
 ) -> usize {
     let (signature, source_map) = value;
-    signature.heap_size() + store_source_map_heap(source_map)
+    store_source_map_heap(source_map) + sole_holder(signature, T::heap_size)
+}
+
+/// `heap_size` for every `XSignature::of`: the signature, `Arc` block included.
+pub(crate) fn signature_of<T: SignatureHeap>(signature: &Arc<T>) -> usize {
+    arc(signature, T::heap_size)
+}
+
+/// The allocation behind an `Arc` — its count beside the value — plus whatever
+/// the value owns. Padding for an over-aligned value goes uncounted.
+fn arc<T>(value: &Arc<T>, owned: impl Fn(&T) -> usize) -> usize {
+    size_of::<usize>() + size_of::<T>() + owned(value)
+}
+
+/// [`arc`], for the producer of an `Arc` that its `of` query normally holds a
+/// clone of: charged here only when this memo is the last holder left.
+fn sole_holder<T>(value: &Arc<T>, owned: impl Fn(&T) -> usize) -> usize {
+    if Arc::strong_count(value) == 1 { arc(value, owned) } else { 0 }
 }
 
 /// What a signature owns beside its source map.

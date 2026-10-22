@@ -583,6 +583,80 @@ m!(Z);
     );
 }
 
+/// What the LRU cap on `macro_arg` (bur) costs, priced on the fixture above:
+/// an argument that was evicted cannot backdate, because salsa compares the
+/// recomputed value with the old one and an evicted memo has none. So typing
+/// in the calling file re-expands that call where the test above re-expands
+/// nothing — and the cascade still stops at the expansion, which backdates, so
+/// the crate def map is not recomputed either way.
+#[test]
+fn typing_beside_an_evicted_macro_arg_re_expands_only_that_call() {
+    let (mut db, pos) = TestDB::with_position(
+        r#"
+//- /lib.rs
+macro_rules! m {
+    ($ident:ident) => {
+        fn $ident() { };
+    }
+}
+mod foo;
+
+//- /foo/mod.rs
+pub mod bar;
+
+//- /foo/bar.rs
+m!(X);
+fn quux() { 1$0 }
+m!(Y);
+m!(Z);
+"#,
+    );
+    let krate = db.test_crate();
+    let resolutions = |db: &TestDB| {
+        let crate_def_map = crate_def_map(db, krate);
+        let module_data = &crate_def_map
+            [crate_def_map.modules_for_file(db, pos.file_id.file_id(db)).next().unwrap()];
+        module_data.scope.resolutions().count()
+    };
+    assert_eq!(resolutions(&db), 4);
+
+    // Keep one argument of the three; the other two lose their values.
+    assert_eq!(salsa::Database::set_lru_capacity_by_name(&mut db, "MacroCallId::macro_arg_", 1), 1);
+    salsa::Database::trigger_lru_eviction(&mut db);
+
+    let new_text = r#"
+m!(X);
+fn quux() { 92 }
+m!(Y);
+m!(Z);
+"#;
+    db.set_file_text(pos.file_id.file_id(&db), new_text);
+
+    execute_assert_events(
+        &db,
+        || assert_eq!(resolutions(&db), 4),
+        &[
+            ("MacroCallId::macro_arg_", 3),
+            // The two evicted calls, and only those: the kept one backdates.
+            ("parse_macro_expansion", 2),
+            ("crate_local_def_map", 0),
+        ],
+        expect![[r#"
+            [
+                "EditionedFileId::parse_",
+                "HirFileId::ast_id_map_",
+                "file_item_tree_query",
+                "real_span_map",
+                "MacroCallId::parse_macro_expansion_",
+                "MacroCallId::macro_arg_",
+                "MacroCallId::parse_macro_expansion_",
+                "MacroCallId::macro_arg_",
+                "MacroCallId::macro_arg_",
+            ]
+        "#]],
+    );
+}
+
 #[test]
 fn item_tree_prevents_reparsing() {
     let (mut db, pos) = TestDB::with_position(

@@ -537,7 +537,18 @@ impl MacroCallId {
     /// Lowers syntactic macro call to a token tree representation. That's a firewall
     /// query, only typing in the macro call itself changes the returned
     /// subtree.
-    #[salsa::tracked(returns(ref), heap_size = crate::heap_size::macro_arg)]
+    ///
+    /// LRU-capped in bur (upstream keeps every argument forever: on a
+    /// 2455-crate workspace that is 0.42 million token trees, 0.27 GB of heap
+    /// that nothing reads once the expansion is memoized). What the cap costs
+    /// is the firewall, and only for an evicted argument: salsa backdates by
+    /// comparing the new value with the old one, and an evicted memo has no old
+    /// value, so an edit to the calling file re-expands that call instead of
+    /// stopping here. The item tree of the expansion still backdates, so the
+    /// cascade ends one level further down. Reading an evicted argument again
+    /// costs a token-tree conversion of the call (plus the file's parse, if
+    /// that was evicted too).
+    #[salsa::tracked(returns(ref), lru = 2048, heap_size = crate::heap_size::macro_arg)]
     #[deprecated = "calling this is incorrect, call `macro_arg_considering_derives` instead"]
     fn macro_arg(self, db: &dyn SourceDatabase) -> MacroArgResult {
         let loc = self.loc(db);

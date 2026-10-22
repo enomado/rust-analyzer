@@ -311,6 +311,9 @@ impl RootDatabase {
             lru_capacity.saturating_mul(8),
         );
         apply(self, "Body::with_source_map_", 512);
+        // Capped by bur, not upstream; see the `lru` attribute on `macro_arg`
+        // in hir-expand for what an evicted argument costs.
+        apply(self, "MacroCallId::macro_arg_", 2048);
         // Inference is the one query bur caps that upstream does not; see the
         // `lru` attribute on `InferenceResult::for_body` in hir-ty for why. The
         // lifetime in the rendered self type is part of the name.

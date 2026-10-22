@@ -146,8 +146,15 @@ impl std::hash::Hash for LocalDefMap {
 impl LocalDefMap {
     /// The buffers this map owns; see [`crate::heap_size`].
     pub(crate) fn heap_size(&self) -> usize {
+        let mut bytes = 0;
+        self.weigh(&mut |_, weight| bytes += weight.bytes);
+        bytes
+    }
+
+    /// [`Self::heap_size`] by field; see [`ItemScope::weigh`].
+    pub(crate) fn weigh(&self, row: &mut dyn FnMut(&'static str, crate::heap_size::Weight)) {
         let Self { extern_prelude } = self;
-        crate::heap_size::index_map(extern_prelude)
+        row("local.extern_prelude", crate::heap_size::index_map_weight(extern_prelude));
     }
 
     pub(crate) const EMPTY: &Self =
@@ -233,10 +240,11 @@ struct DefMapCrateData {
 }
 
 impl DefMapCrateData {
-    /// The buffers shared by a crate's def map and all its block def maps; see
-    /// [`DefMap::heap_size`] for who charges for them.
-    fn heap_size(&self) -> usize {
-        use crate::heap_size::{hash_map, hash_map_with, slice, vec};
+    /// The buffers shared by a crate's def map and all its block def maps, by
+    /// field (see [`ItemScope::weigh`]); see [`DefMap::heap_size`] for who
+    /// charges for them.
+    fn weigh(&self, row: &mut dyn FnMut(&'static str, crate::heap_size::Weight)) {
+        use crate::heap_size::{hash_map_weight, slice_weight, vec_weight};
 
         let DefMapCrateData {
             exported_derives,
@@ -251,11 +259,14 @@ impl DefMapCrateData {
             recursion_limit: _,
         } = self;
 
-        hash_map_with(exported_derives, |names| slice(names))
-            + hash_map(fn_proc_macro_mapping)
-            + hash_map(fn_proc_macro_mapping_back)
-            // `Symbol` is interned: the vector owns its slots, not the strings.
-            + vec(registered_tools)
+        row("crate_data.exported_derives", hash_map_weight(exported_derives));
+        for names in exported_derives.values() {
+            row("crate_data.exported_derives (names)", slice_weight(names));
+        }
+        row("crate_data.fn_proc_macro_mapping", hash_map_weight(fn_proc_macro_mapping));
+        row("crate_data.fn_proc_macro_mapping_back", hash_map_weight(fn_proc_macro_mapping_back));
+        // `Symbol` is interned: the vector owns its slots, not the strings.
+        row("crate_data.registered_tools", vec_weight(registered_tools));
     }
 
     fn new(edition: Edition) -> Self {
@@ -505,7 +516,15 @@ impl DefMap {
     /// Destructured so that a field added upstream stops the build here rather
     /// than going silently uncounted.
     pub(crate) fn heap_size(&self) -> usize {
-        use crate::heap_size::{hash_map, hash_map_with, index_map_with, vec};
+        let mut bytes = 0;
+        self.weigh(&mut |_, weight| bytes += weight.bytes);
+        bytes
+    }
+
+    /// [`Self::heap_size`] by field; see [`ItemScope::weigh`]. The module
+    /// rows sum over every module of the map.
+    pub(crate) fn weigh(&self, row: &mut dyn FnMut(&'static str, crate::heap_size::Weight)) {
+        use crate::heap_size::{Weight, hash_map_weight, index_map_weight, vec_weight};
 
         let DefMap {
             krate: _,
@@ -520,17 +539,23 @@ impl DefMap {
             data,
         } = self;
 
-        let crate_data = match block {
-            Some(_) => 0,
-            None => size_of::<DefMapCrateData>() + data.heap_size(),
-        };
+        if block.is_none() {
+            let arc = size_of::<DefMapCrateData>();
+            row("crate_data", Weight { containers: 1, entries: 1, filled_bytes: arc, bytes: arc });
+            data.weigh(row);
+        }
 
-        index_map_with(&modules.inner, ModuleData::heap_size)
-            + hash_map(macro_use_prelude)
-            + hash_map_with(derive_helpers_in_scope, vec)
-            + hash_map(macro_def_to_macro_id)
-            + vec(diagnostics)
-            + crate_data
+        row("modules", index_map_weight(&modules.inner));
+        for module in modules.inner.values() {
+            module.weigh(row);
+        }
+        row("macro_use_prelude", hash_map_weight(macro_use_prelude));
+        row("derive_helpers_in_scope", hash_map_weight(derive_helpers_in_scope));
+        for helpers in derive_helpers_in_scope.values() {
+            row("derive_helpers_in_scope (helpers)", vec_weight(helpers));
+        }
+        row("macro_def_to_macro_id", hash_map_weight(macro_def_to_macro_id));
+        row("diagnostics", vec_weight(diagnostics));
     }
 
     fn empty(
@@ -827,9 +852,10 @@ impl DefMap {
 impl ModuleData {
     /// What one module inside a def map owns; see [`crate::heap_size`]. Nearly
     /// all of it is the item scope.
-    pub(crate) fn heap_size(&self) -> usize {
+    fn weigh(&self, row: &mut dyn FnMut(&'static str, crate::heap_size::Weight)) {
         let ModuleData { origin: _, visibility: _, parent: _, children, scope } = self;
-        crate::heap_size::index_map(children) + scope.heap_size()
+        row("module.children", crate::heap_size::index_map_weight(children));
+        scope.weigh(row);
     }
 
     pub(crate) fn new(

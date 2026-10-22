@@ -214,6 +214,21 @@ impl RootDatabase {
         db
     }
 
+    /// Keep the file texts set from now on out of the heap, as `store` says;
+    /// see [`base_db::file_text_store`]. Call before loading anything: the
+    /// store belongs to this database's files, which its clones share, and
+    /// texts already set stay where they are.
+    pub fn set_file_text_store(&mut self, store: base_db::file_text_store::FileTextStore) {
+        Arc::get_mut(&mut self.files)
+            .expect("a file text store is set before the database is cloned")
+            .set_text_store(store);
+    }
+
+    /// See [`base_db::Files::text_drift`].
+    pub fn file_text_drift(&self) -> Option<String> {
+        self.files.text_drift()
+    }
+
     pub fn enable_proc_attr_macros(&mut self) {
         hir::db::set_expand_proc_attr_macros(self, true);
     }
@@ -304,8 +319,9 @@ impl RootDatabase {
             "InferenceResult < 'db >::for_body_",
             base_db::DEFAULT_BORROWCK_LRU_CAP,
         );
-        // `file_text` is intentionally absent: it carries no `lru` attribute
-        // upstream any more, so naming it here would only log a warning.
+        // The texts a file text store keeps out of the heap (bur); an inline
+        // text — upstream's only kind — never goes through this query.
+        apply(self, "loaded_file_text", base_db::DEFAULT_FILE_TEXT_LRU_CAP);
         missed
     }
 

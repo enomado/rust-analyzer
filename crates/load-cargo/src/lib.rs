@@ -58,6 +58,20 @@ pub fn load_workspace_at(
     load_config: &LoadCargoConfig,
     progress: &(dyn Fn(String) + Sync),
 ) -> anyhow::Result<(RootDatabase, vfs::Vfs, Option<ProcMacroClient>)> {
+    let workspace = project_workspace_at(root, cargo_config, load_config, progress)?;
+    load_workspace(workspace, &cargo_config.extra_env, load_config)
+}
+
+/// The workspace at `root`, its build scripts run if `load_config` asks —
+/// [`load_workspace_at`] without the database, for an embedder that sets its
+/// own database up first (bur: a file text store) and then calls
+/// [`load_workspace_into_db`].
+pub fn project_workspace_at(
+    root: &Path,
+    cargo_config: &CargoConfig,
+    load_config: &LoadCargoConfig,
+    progress: &(dyn Fn(String) + Sync),
+) -> anyhow::Result<ProjectWorkspace> {
     let root = AbsPathBuf::assert_utf8(std::env::current_dir()?.join(root));
     let root = ProjectManifest::discover_single(&root)?;
     let manifest_path = root.manifest_path().clone();
@@ -74,8 +88,7 @@ pub fn load_workspace_at(
         }
         workspace.set_build_scripts(build_scripts)
     }
-
-    load_workspace(workspace, &cargo_config.extra_env, load_config)
+    Ok(workspace)
 }
 
 pub fn load_workspace(

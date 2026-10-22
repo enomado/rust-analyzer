@@ -12,6 +12,7 @@ use span::TextSize;
 
 mod change;
 mod editioned_file_id;
+pub mod file_text_store;
 mod input;
 pub mod target;
 
@@ -74,9 +75,25 @@ pub struct Files {
     files: Arc<DashMap<vfs::FileId, FileText, BuildHasherDefault<FxHasher>>>,
     source_roots: Arc<DashMap<SourceRootId, SourceRootInput, BuildHasherDefault<FxHasher>>>,
     file_source_roots: Arc<DashMap<vfs::FileId, FileSourceRootInput, BuildHasherDefault<FxHasher>>>,
+    /// `None`: every text in the heap, as upstream keeps them.
+    text_store: Option<file_text_store::TextStore>,
 }
 
 impl Files {
+    /// Store file texts set from now on as `store` says; see
+    /// [`file_text_store`]. Texts already set stay where they are, so an
+    /// embedder calls this before loading anything.
+    pub fn set_text_store(&mut self, store: file_text_store::FileTextStore) {
+        self.text_store = Some(file_text_store::TextStore::new(store));
+    }
+
+    /// The first library file whose text was read back and found changed on
+    /// disk since it was set, if any. Once there is one, the database no longer
+    /// describes the files on disk and the workspace has to be reloaded.
+    pub fn text_drift(&self) -> Option<String> {
+        self.text_store.as_ref()?.drift.first()
+    }
+
     pub fn file_text(&self, file_id: vfs::FileId) -> FileText {
         match self.files.get(&file_id) {
             Some(text) => *text,
@@ -87,12 +104,13 @@ impl Files {
     }
 
     pub fn set_file_text(&self, db: &mut dyn SourceDatabase, file_id: vfs::FileId, text: &str) {
+        let stored = self.stored_text(db, file_id, text);
         match self.files.entry(file_id) {
             Entry::Occupied(mut occupied) => {
-                occupied.get_mut().set_text(db).to(Arc::from(text));
+                occupied.get_mut().set_stored(db).to(stored);
             }
             Entry::Vacant(vacant) => {
-                let text = FileText::new(db, Arc::from(text), file_id);
+                let text = FileText::new(db, stored, file_id);
                 vacant.insert(text);
             }
         };
@@ -105,16 +123,39 @@ impl Files {
         text: &str,
         durability: Durability,
     ) {
+        let stored = self.stored_text(db, file_id, text);
         match self.files.entry(file_id) {
             Entry::Occupied(mut occupied) => {
-                occupied.get_mut().set_text(db).with_durability(durability).to(Arc::from(text));
+                occupied.get_mut().set_stored(db).with_durability(durability).to(stored);
             }
             Entry::Vacant(vacant) => {
-                let text =
-                    FileText::builder(Arc::from(text), file_id).durability(durability).new(db);
+                let text = FileText::builder(stored, file_id).durability(durability).new(db);
                 vacant.insert(text);
             }
         };
+    }
+
+    /// Where `text` goes. The file's source root says whether it is a library
+    /// and what its path is; `FileChange::apply` sets the roots before the
+    /// texts, so a loaded workspace always has them. A file without a recorded
+    /// root (a test fixture setting texts directly) is stored as a workspace
+    /// file without a path.
+    fn stored_text(
+        &self,
+        db: &dyn SourceDatabase,
+        file_id: vfs::FileId,
+        text: &str,
+    ) -> file_text_store::StoredText {
+        let Some(store) = &self.text_store else {
+            return file_text_store::StoredText::Inline(Arc::from(text));
+        };
+        let root_id = self.file_source_roots.get(&file_id).map(|root| root.source_root_id(db));
+        let root = root_id
+            .and_then(|id| self.source_roots.get(&id).map(|root| *root))
+            .map(|root| root.source_root(db));
+        let path = root.as_ref().and_then(|root| root.path_for_file(&file_id)?.as_path());
+        let is_library = root.as_ref().is_some_and(|root| root.is_library);
+        store.store(path, is_library, text)
     }
 
     /// Source root of the file.
@@ -216,20 +257,55 @@ pub struct LocalRoots {
 
 #[salsa::input(debug, heap_size = file_text_heap_size)]
 pub struct FileText {
+    /// The text, or a handle to it; read it with [`FileText::text`].
     #[returns(ref)]
-    pub text: Arc<str>,
+    pub stored: file_text_store::StoredText,
     pub file_id: vfs::FileId,
 }
 
-/// `heap_size` for [`FileText`]: the text's `triomphe::Arc<str>` — the
-/// reference count, then the bytes, padded to the count's alignment.
+impl FileText {
+    /// The text of the file.
+    ///
+    /// An inline text is the input's own `Arc`; any other is loaded by
+    /// [`loaded_file_text`], whose LRU decides how many stay in the heap. Either
+    /// way the reader depends on the input, so a changed text invalidates it.
+    pub fn text<'db, Db: ?Sized + salsa::Database>(self, db: &'db Db) -> &'db Arc<str> {
+        match self.stored(db) {
+            file_text_store::StoredText::Inline(text) => text,
+            file_text_store::StoredText::Mapped(_) | file_text_store::StoredText::OnDisk(_) => {
+                loaded_file_text(db.as_dyn_database(), self)
+            }
+        }
+    }
+}
+
+/// The text of a file stored out of the heap, back in it until evicted.
 ///
-/// The input is the text's one owner: every setter in `Files` builds a fresh
-/// `Arc::from(text)`, and readers borrow it (`returns(ref)`), so a clone a
+/// The capacity is the old `FileTextQuery`'s, from when rust-analyzer kept
+/// texts compressed: a text is wanted again only to build what is derived from
+/// it, and most of that (`parse`, `ast_id_map`, item trees) is cached itself.
+#[salsa::tracked(returns(ref), lru = 16, heap_size = loaded_file_text_heap_size)]
+pub fn loaded_file_text(db: &dyn salsa::Database, file: FileText) -> Arc<str> {
+    file.stored(db).load()
+}
+
+/// `heap_size` for [`FileText`]: what the input itself holds — the whole text
+/// when it is inline, a path or nothing when it is not.
+///
+/// The input is an inline text's one owner: every setter in `Files` builds a
+/// fresh `Arc::from(text)`, and readers borrow it (`returns(ref)`), so a clone a
 /// query makes is charged here once. Checked against the allocator by
 /// `tests/heap_size_oracle.rs`.
-pub fn file_text_heap_size((text, _file_id): &(Arc<str>, vfs::FileId)) -> usize {
-    (std::mem::size_of::<usize>() + text.len()).next_multiple_of(std::mem::align_of::<usize>())
+pub fn file_text_heap_size(
+    (stored, _file_id): &(file_text_store::StoredText, vfs::FileId),
+) -> usize {
+    stored.heap_size()
+}
+
+/// `heap_size` for [`loaded_file_text`]: the loaded `Arc<str>`, which the memo
+/// owns — it was built by the load, not cloned from the input.
+pub fn loaded_file_text_heap_size(text: &Arc<str>) -> usize {
+    file_text_store::arc_str_heap_size(text)
 }
 
 #[salsa::input(debug)]

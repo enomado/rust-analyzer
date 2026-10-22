@@ -626,10 +626,10 @@ impl<'db> InherentImpls<'db> {
 
                 // To better support custom derives, collect impls in all unnamed const items.
                 // const _: () = { ... };
+                // Through `Body::block_scopes`, not the body: see there (bur).
                 for konst in module_data.scope.unnamed_consts() {
-                    let body = Body::of(db, konst.into());
-                    for (_, block_def_map) in body.blocks(db) {
-                        collect(db, block_def_map, map);
+                    for &block in Body::block_scopes(db, konst.into()) {
+                        collect(db, block_def_map(db, block), map);
                     }
                 }
             }
@@ -782,10 +782,10 @@ impl<'db> TraitImpls<'db> {
 
                 // To better support custom derives, collect impls in all unnamed const items.
                 // const _: () = { ... };
+                // Through `Body::block_scopes`, not the body: see there (bur).
                 for konst in module_data.scope.unnamed_consts() {
-                    let body = Body::of(db, konst.into());
-                    for (_, block_def_map) in body.blocks(db) {
-                        collect(db, block_def_map, lang_items, map);
+                    for &block in Body::block_scopes(db, konst.into()) {
+                        collect(db, block_def_map(db, block), lang_items, map);
                     }
                 }
             }

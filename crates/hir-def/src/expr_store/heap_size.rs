@@ -45,6 +45,7 @@
 use triomphe::Arc;
 
 use crate::{
+    BlockId,
     expr_store::{
         ExpressionOnlySourceMap, ExpressionOnlyStore, ExpressionStore, ExpressionStoreSourceMap,
         FormatTemplate,
@@ -73,6 +74,11 @@ pub(crate) fn body_with_source_map(value: &(Arc<Body>, BodySourceMap)) -> usize 
 /// `heap_size` for [`Body::of`]: the body, `Arc` block included.
 pub(crate) fn body_of(body: &Arc<Body>) -> usize {
     arc(body, body_heap)
+}
+
+/// `heap_size` for [`Body::block_scopes`]: its own copy of the block ids.
+pub(crate) fn block_scopes(blocks: &Box<[BlockId]>) -> usize {
+    slice(blocks)
 }
 
 /// `heap_size` for every `XSignature::with_source_map`. They all return the

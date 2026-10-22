@@ -657,6 +657,113 @@ m!(Z);
     );
 }
 
+/// What the LRU cap on `Body::of` (bur; upstream keeps every body) costs. On
+/// a large workspace the producer, `Body::with_source_map` (`lru = 512`), is
+/// usually evicted, and an edit anywhere in the file re-lowers every body there
+/// that is asked for again: an evicted producer cannot backdate. Uncapped,
+/// `Body::of` is where that stops — it compares the fresh body by value — so
+/// what reads the body stays put. An evicted `Body::of` has no old value
+/// either, and its readers re-run too: here the scopes of the two evicted
+/// bodies. The readers that walk every body of a module or a crate (symbol
+/// index, impl indexes) read `Body::block_scopes` instead, which is not capped
+/// and backdates — they must not re-run.
+#[test]
+fn typing_beside_evicted_bodies_re_runs_their_readers() {
+    #[salsa::tracked]
+    fn block_count(db: &dyn base_db::SourceDatabase, def: crate::DefWithBodyId) -> usize {
+        crate::expr_store::Body::block_scopes(db, def).len()
+    }
+
+    let (mut db, pos) = TestDB::with_position(
+        r#"
+//- /lib.rs
+fn a() { struct S; let x = 1; }
+fn b() { struct S; let x = 1; }
+fn c() { struct S; let x = 1; }
+fn quux() { 1$0 }
+"#,
+    );
+    let krate = db.test_crate();
+    let bodies: Vec<crate::DefWithBodyId> = {
+        let def_map = crate_def_map(&db, krate);
+        def_map
+            .modules()
+            .flat_map(|(_, module)| module.scope.declarations())
+            .filter_map(|def| match def {
+                crate::ModuleDefId::FunctionId(it) => Some(it.into()),
+                _ => None,
+            })
+            .collect()
+    };
+    // `quux` is not asked for: its body really changes.
+    let bodies = &bodies[..3];
+    let read = |db: &TestDB| {
+        bodies
+            .iter()
+            .map(|&def| {
+                let scopes = crate::expr_store::scope::ExprScopes::body_expr_scopes(db, def)
+                    .scope_by_expr()
+                    .iter()
+                    .count();
+                (scopes, block_count(db, def))
+            })
+            .fold((0, 0), |(s, b), (scopes, blocks)| (s + scopes, b + blocks))
+    };
+    let before = read(&db);
+    assert!(before.0 > 0, "the scopes of three bodies cannot be empty");
+    assert_eq!(before.1, 3, "each body has one block with an item");
+
+    // Keep one producer and one body of the three; the others lose their values.
+    for query in ["Body::with_source_map_", "Body::of_"] {
+        assert_eq!(salsa::Database::set_lru_capacity_by_name(&mut db, query, 1), 1, "{query}");
+    }
+    salsa::Database::trigger_lru_eviction(&mut db);
+
+    // An edit after the three bodies: their own text does not move.
+    let file_id = pos.file_id.file_id(&db);
+    let new_text = db.file_text(file_id).text(&db).replace("{ 1 }", "{ 92 }");
+    db.set_file_text(file_id, &new_text);
+
+    execute_assert_events(
+        &db,
+        || assert_eq!(read(&db), before),
+        &[
+            ("Body::with_source_map_", 3),
+            // The two evicted producers, and only those: the kept one backdates.
+            ("Body::of_", 2),
+            // The price of the cap: an uncapped `Body::of` backdates here, and
+            // no scopes are rebuilt.
+            ("body_expr_scopes", 2),
+            // ...and where it stops for the readers of whole modules and crates.
+            ("Body::block_scopes_", 2),
+            ("block_count", 0),
+        ],
+        expect![[r#"
+            [
+                "EditionedFileId::parse_",
+                "HirFileId::ast_id_map_",
+                "ExprScopes::body_expr_scopes_",
+                "Body::of_",
+                "Body::with_source_map_",
+                "file_item_tree_query",
+                "real_span_map",
+                "AttrFlags::query_",
+                "block_item_tree_query",
+                "Body::block_scopes_",
+                "ExprScopes::body_expr_scopes_",
+                "Body::of_",
+                "Body::with_source_map_",
+                "AttrFlags::query_",
+                "block_item_tree_query",
+                "Body::block_scopes_",
+                "Body::with_source_map_",
+                "AttrFlags::query_",
+                "block_item_tree_query",
+            ]
+        "#]],
+    );
+}
+
 /// What an evicted signature source map costs (bur caps every
 /// `XSignature::with_source_map`; upstream caps none). An edit in the file
 /// re-lowers every signature there that is asked for again — evicted or not,

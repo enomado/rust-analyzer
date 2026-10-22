@@ -294,34 +294,38 @@ impl RootDatabase {
         };
         apply(self, "EditionedFileId::parse_", lru_capacity);
         // macro expansions are usually rather small, so we can afford to keep more of them alive
-        apply(
-            self,
-            "MacroCallId::parse_macro_expansion_",
-            lru_capacity.saturating_mul(4),
-        );
+        apply(self, "MacroCallId::parse_macro_expansion_", lru_capacity.saturating_mul(4));
         // The fixed numbers below are the `lru = N` each query already carries in
         // its attribute, restated so that a later call cannot leave a query at
         // whatever a previous configuration set. Deliberately today's upstream
         // tuning and not the pre-salsa-transition code that used to sit here —
         // that code asked for 2048 on the body/source-map query, upstream has
         // since settled on 512.
-        apply(
-            self,
-            "HirFileId::ast_id_map_",
-            lru_capacity.saturating_mul(8),
-        );
+        apply(self, "HirFileId::ast_id_map_", lru_capacity.saturating_mul(8));
         apply(self, "Body::with_source_map_", 512);
+        // Capped by bur, not upstream; see the `lru` attribute on
+        // `StructSignature::with_source_map` in hir-def.
+        for query in [
+            "StructSignature::with_source_map_",
+            "UnionSignature::with_source_map_",
+            "EnumSignature::with_source_map_",
+            "ConstSignature::with_source_map_",
+            "StaticSignature::with_source_map_",
+            "ImplSignature::with_source_map_",
+            "TraitSignature::with_source_map_",
+            "FunctionSignature::with_source_map_",
+            "TypeAliasSignature::with_source_map_",
+            "VariantFields::with_source_map_",
+        ] {
+            apply(self, query, 512);
+        }
         // Capped by bur, not upstream; see the `lru` attribute on `macro_arg`
         // in hir-expand for what an evicted argument costs.
         apply(self, "MacroCallId::macro_arg_", 2048);
-        // Inference is the one query bur caps that upstream does not; see the
+        // Inference is capped by bur as well, not upstream; see the
         // `lru` attribute on `InferenceResult::for_body` in hir-ty for why. The
         // lifetime in the rendered self type is part of the name.
-        apply(
-            self,
-            "InferenceResult < 'db >::for_body_",
-            base_db::DEFAULT_BORROWCK_LRU_CAP,
-        );
+        apply(self, "InferenceResult < 'db >::for_body_", base_db::DEFAULT_BORROWCK_LRU_CAP);
         // The texts a file text store keeps out of the heap (bur); an inline
         // text — upstream's only kind — never goes through this query.
         apply(self, "loaded_file_text", base_db::DEFAULT_FILE_TEXT_LRU_CAP);

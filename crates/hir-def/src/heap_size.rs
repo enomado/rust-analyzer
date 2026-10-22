@@ -359,6 +359,133 @@ m!(a);
         );
     }
 
+    /// A signature (and a body) is one `Arc` held by two memos — its producer
+    /// `with_source_map` and the `of` that clones it out — and is charged to
+    /// exactly one of them, the one that survives eviction.
+    ///
+    /// Three sides, because each alone stays green while another breaks: the
+    /// producer alone pays for object and map (`of` never ran); with `of`
+    /// alive the two rows add up to that same total, not more (the object is
+    /// not charged twice) and not less; and after evicting the producer the
+    /// object is still in the report (the bug this rule fixes: 67 532 bodies
+    /// in a live daemon weighed as 512).
+    #[test]
+    fn a_shared_signature_is_charged_once_and_survives_eviction() {
+        use crate::{
+            DefWithBodyId, FunctionId, ImplId, ModuleDefId, expr_store::body::Body,
+            signatures::ImplSignature,
+        };
+
+        const IMPLS: &str = "ImplSignature::with_source_map_";
+        const IMPL_OF: &str = "ImplSignature::of_";
+        const BODIES: &str = "Body::with_source_map_";
+        const BODY_OF: &str = "Body::of_";
+
+        let fixture = format!(
+            "//- /lib.rs\ntrait Tr<T> {{}}\n{}",
+            (0..20)
+                .map(|i| {
+                    format!(
+                        "struct S{i}<T>(T);\n\
+                         impl<T: Clone, U: Copy> Tr<U> for S{i}<T> where T: Default {{}}\n\
+                         fn f{i}(a: u32) -> u32 {{ let b = a + {i}; b * 2 }}\n"
+                    )
+                })
+                .collect::<String>()
+        );
+        let db_with_items = || {
+            let db = TestDB::with_files(&fixture);
+            let def_map = crate_def_map(&db, db.fetch_test_crate());
+            let (impls, functions): (Vec<ImplId>, Vec<FunctionId>) = def_map
+                .modules()
+                .map(|(_, module)| {
+                    let functions = module.scope.declarations().filter_map(|it| match it {
+                        ModuleDefId::FunctionId(it) => Some(it),
+                        _ => None,
+                    });
+                    (module.scope.impls().collect::<Vec<_>>(), functions.collect::<Vec<_>>())
+                })
+                .fold((vec![], vec![]), |(mut impls, mut fns), (i, f)| {
+                    impls.extend(i);
+                    fns.extend(f);
+                    (impls, fns)
+                });
+            assert_eq!((impls.len(), functions.len()), (20, 20), "positive control: fixture items");
+            (db, impls, functions)
+        };
+        let heaps = |db: &mut TestDB, queries: &[&str]| -> Vec<Option<usize>> {
+            let usage = <dyn salsa::Database>::memory_usage(db);
+            queries
+                .iter()
+                .map(|query| usage.queries.get(*query).and_then(|info| info.heap_size_of_fields()))
+                .collect()
+        };
+
+        // The producers alone: each pays for its objects and its maps.
+        let (mut db, impls, functions) = db_with_items();
+        for &id in &impls {
+            ImplSignature::with_source_map(&db, id);
+        }
+        for &id in &functions {
+            Body::with_source_map(&db, DefWithBodyId::FunctionId(id));
+        }
+        let [Some(impls_alone), Some(bodies_alone)] = heaps(&mut db, &[IMPLS, BODIES])[..] else {
+            panic!("a producer reports no heap size")
+        };
+
+        // With `of` alive: the objects move to `of`, the maps stay.
+        let (mut db, impls, functions) = db_with_items();
+        for &id in &impls {
+            ImplSignature::of(&db, id);
+        }
+        for &id in &functions {
+            Body::of(&db, DefWithBodyId::FunctionId(id));
+        }
+        let [Some(impl_maps), Some(impl_objects), Some(body_maps), Some(body_objects)] =
+            heaps(&mut db, &[IMPLS, IMPL_OF, BODIES, BODY_OF])[..]
+        else {
+            panic!("an `of` or a producer reports no heap size")
+        };
+        assert!(
+            impl_objects > 0 && impl_maps > 0 && body_objects > 0 && body_maps > 0,
+            "positive control: every half weighs something (impls {impl_objects} + \
+             {impl_maps}, bodies {body_objects} + {body_maps})"
+        );
+        assert_eq!(
+            (impl_objects + impl_maps, body_objects + body_maps),
+            (impls_alone, bodies_alone),
+            "with `of` alive the two rows must add up to what the producer reported alone: \
+             more is the shared `Arc` charged twice, less is it charged to nobody"
+        );
+
+        // Evict the producers down to one memo each: the maps go, the objects
+        // `of` still holds stay in the report.
+        for query in [IMPLS, BODIES] {
+            assert_eq!(salsa::Database::set_lru_capacity_by_name(&mut db, query, 1), 1);
+        }
+        salsa::Database::trigger_lru_eviction(&mut db);
+        let after = heaps(&mut db, &[IMPLS, IMPL_OF, BODIES, BODY_OF]);
+        let [
+            Some(impl_maps_left),
+            Some(impl_objects_left),
+            Some(body_maps_left),
+            Some(body_objects_left),
+        ] = after[..]
+        else {
+            panic!("a report lost its heap size after eviction: {after:?}")
+        };
+        assert!(
+            impl_maps_left < impl_maps && body_maps_left < body_maps,
+            "positive control: eviction dropped no source map (impls {impl_maps} → \
+             {impl_maps_left}, bodies {body_maps} → {body_maps_left})"
+        );
+        assert_eq!(
+            (impl_objects_left, body_objects_left),
+            (impl_objects, body_objects),
+            "evicting the producer took objects out of the report that `of` still holds"
+        );
+    }
+
     /// Nearly everything a def map owns hangs off the item scopes of its
     /// modules, which is the reason it is worth weighing at all.
     #[test]

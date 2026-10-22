@@ -89,7 +89,8 @@ impl Body {
     // The `heap_size` is what turns this ingredient's line in a
     // `Database::memory_usage()` report from a memo count into bytes; see
     // `crate::expr_store::heap_size` for what the number does and does not
-    // include, and for why `Body::of` below deliberately has no such option.
+    // include, and for why the body is charged to `Body::of` below while this
+    // query pays for its source map.
     #[salsa::tracked(lru = 512, returns(ref), heap_size = crate::expr_store::heap_size::body_with_source_map)]
     pub fn with_source_map(
         db: &dyn SourceDatabase,
@@ -138,7 +139,7 @@ impl Body {
         (Arc::new(body), source_map)
     }
 
-    #[salsa::tracked(returns(deref))]
+    #[salsa::tracked(returns(deref), heap_size = crate::expr_store::heap_size::body_of)]
     pub fn of(db: &dyn SourceDatabase, def: DefWithBodyId) -> Arc<Body> {
         Self::with_source_map(db, def).0.clone()
     }

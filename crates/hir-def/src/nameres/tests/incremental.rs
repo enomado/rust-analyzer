@@ -657,6 +657,83 @@ m!(Z);
     );
 }
 
+/// What an evicted signature source map costs (bur caps every
+/// `XSignature::with_source_map`; upstream caps none). An edit in the file
+/// re-lowers every signature there that is asked for again — evicted or not,
+/// since the producer reads the file's syntax. The difference is in `of`: a
+/// kept producer backdates and `of` is not even re-run, an evicted one cannot
+/// (there is no old value to compare with) and its `of` re-runs — but `of`
+/// compares the fresh signature by value and backdates in turn, so a query
+/// that reads only `of` stays put.
+#[test]
+fn typing_beside_evicted_signature_maps_stops_at_of() {
+    #[salsa::tracked]
+    fn where_clause_count(db: &dyn base_db::SourceDatabase, id: crate::ImplId) -> usize {
+        crate::signatures::ImplSignature::of(db, id).generic_params.where_predicates.len()
+    }
+
+    let (mut db, pos) = TestDB::with_position(
+        r#"
+//- /lib.rs
+trait Tr {}
+struct A<T>(T);
+struct B<T>(T);
+struct C<T>(T);
+impl<T> Tr for A<T> where T: Copy {}
+impl<T> Tr for B<T> where T: Copy {}
+impl<T> Tr for C<T> where T: Copy {}
+fn quux() { 1$0 }
+"#,
+    );
+    let krate = db.test_crate();
+    let impls = || -> Vec<crate::ImplId> {
+        let def_map = crate_def_map(&db, krate);
+        def_map.modules().flat_map(|(_, module)| module.scope.impls()).collect()
+    };
+    let impls = impls();
+    assert_eq!(impls.len(), 3);
+    let counts = |db: &TestDB| impls.iter().map(|&id| where_clause_count(db, id)).sum::<usize>();
+    assert_eq!(counts(&db), 3);
+
+    // Keep one source map of the three; the other two lose their values.
+    assert_eq!(
+        salsa::Database::set_lru_capacity_by_name(&mut db, "ImplSignature::with_source_map_", 1),
+        1
+    );
+    salsa::Database::trigger_lru_eviction(&mut db);
+
+    // An edit AFTER the impls, and nothing else: the source maps hold absolute
+    // text ranges, so anything that shifts the impls (a leading newline, say)
+    // changes every map and nothing could backdate in the first place.
+    let file_id = pos.file_id.file_id(&db);
+    let new_text = db.file_text(file_id).text(&db).replace("{ 1 }", "{ 92 }");
+    db.set_file_text(file_id, &new_text);
+
+    execute_assert_events(
+        &db,
+        || assert_eq!(counts(&db), 3),
+        &[
+            ("ImplSignature::with_source_map_", 3),
+            // The two evicted maps, and only those: the kept one backdates.
+            ("ImplSignature::of_", 2),
+            ("where_clause_count", 0),
+        ],
+        expect![[r#"
+            [
+                "EditionedFileId::parse_",
+                "HirFileId::ast_id_map_",
+                "ImplSignature::of_",
+                "ImplSignature::with_source_map_",
+                "file_item_tree_query",
+                "real_span_map",
+                "ImplSignature::of_",
+                "ImplSignature::with_source_map_",
+                "ImplSignature::with_source_map_",
+            ]
+        "#]],
+    );
+}
+
 #[test]
 fn item_tree_prevents_reparsing() {
     let (mut db, pos) = TestDB::with_position(

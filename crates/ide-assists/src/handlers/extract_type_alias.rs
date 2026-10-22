@@ -1,6 +1,7 @@
 use either::Either;
 use hir::HirDisplay;
 use ide_db::syntax_helpers::{node_ext::walk_ty, suggest_name::NameGenerator};
+use itertools::Itertools;
 use syntax::{
     ast::{self, AstNode, HasGenericArgs, HasGenericParams, HasName, edit::IndentLevel},
     syntax_editor,
@@ -199,6 +200,7 @@ fn collect_used_generics<'gp>(
         ast::GenericParam::TypeParam(_) => 1,
     });
 
+    let generics = generics.into_iter().unique().collect::<Vec<_>>();
     Some(generics).filter(|it| !it.is_empty())
 }
 
@@ -373,6 +375,44 @@ type $0Type<'inner, 'outer, Outer, Inner, const INNER: usize, const OUTER: usize
 
 impl<'outer, Outer, const OUTER: usize> () {
     fn func<'inner, Inner, const INNER: usize>(_: Type<'inner, 'outer, Outer, Inner, INNER, OUTER>) {}
+}
+"#,
+        );
+    }
+
+    #[test]
+    fn repeated_type_generics() {
+        check_assist(
+            extract_type_alias,
+            r#"
+struct S<T, U> {
+    field: $0(T, U, T)$0,
+}
+"#,
+            r#"
+type $0Type<T, U> = (T, U, T);
+
+struct S<T, U> {
+    field: Type<T, U>,
+}
+"#,
+        );
+    }
+
+    #[test]
+    fn repeated_lifetime_and_const_generics() {
+        check_assist(
+            extract_type_alias,
+            r#"
+struct S<'a, 'b, const N: usize, const M: usize> {
+    field: $0(&'a [u8; N], &'b [u8; M], &'a [u8; N])$0,
+}
+"#,
+            r#"
+type $0Type<'a, 'b, const N: usize, const M: usize> = (&'a [u8; N], &'b [u8; M], &'a [u8; N]);
+
+struct S<'a, 'b, const N: usize, const M: usize> {
+    field: Type<'a, 'b, N, M>,
 }
 "#,
         );

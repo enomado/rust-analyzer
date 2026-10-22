@@ -24,7 +24,7 @@ use crate::{
 pub struct DeclarativeMacroExpander {
     pub mac: mbe::DeclarativeMacro,
     pub transparency: Transparency,
-    edition: Edition,
+    pub(crate) edition: Edition,
 }
 
 impl DeclarativeMacroExpander {
@@ -81,7 +81,7 @@ impl DeclarativeMacroExpander {
 #[salsa::tracked]
 impl AstId<ast::Macro> {
     /// Fetches (and compiles) the expander of this decl macro.
-    #[salsa::tracked(returns(ref))]
+    #[salsa::tracked(returns(ref), heap_size = crate::heap_size::decl_macro_expander)]
     pub fn decl_macro_expander(
         self,
         db: &dyn SourceDatabase,

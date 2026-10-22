@@ -260,6 +260,32 @@ impl DeclarativeMacro {
         self.rules.len()
     }
 
+    /// Bytes this macro owns on the heap: its rules, their pattern and
+    /// template trees, and the parse error if there is one — for salsa's
+    /// `heap_size` on `decl_macro_expander`.
+    ///
+    /// Requested bytes, as the allocator was asked for them (checked against
+    /// a counting allocator by `tests/heap_size_oracle.rs`). Symbols are
+    /// interned and counted at their interner, not here. Destructuring is
+    /// exhaustive down the tree, so a field upstream adds is a compile error
+    /// rather than a silent zero.
+    pub fn heap_size(&self) -> usize {
+        let DeclarativeMacro { rules, err } = self;
+        let rules = size_of_val::<[Rule]>(rules)
+            + rules
+                .iter()
+                .map(|Rule { style: _, lhs, rhs }| lhs.heap_size() + rhs.heap_size())
+                .sum::<usize>();
+        let err = err.as_deref().map_or(0, |err| {
+            size_of::<ParseError>()
+                + match err {
+                    ParseError::UnexpectedToken(text) | ParseError::Expected(text) => text.len(),
+                    ParseError::InvalidRepeat | ParseError::RepetitionEmptyTokenTree => 0,
+                }
+        });
+        rules + err
+    }
+
     pub fn rule_styles(&self) -> MacroCallStyles {
         if self.rules.is_empty() {
             // No rules could be parsed, so fall back to assuming that this

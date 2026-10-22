@@ -45,6 +45,17 @@ pub(crate) fn macro_call_loc((loc,): &(MacroCallLoc,)) -> usize {
     }
 }
 
+/// `heap_size` for `decl_macro_expander`: the compiled rules of one
+/// `macro_rules!` (or `macro`), which `mbe` weighs itself — the tree types are
+/// private to it.
+pub(crate) fn decl_macro_expander(
+    expander: &crate::declarative::DeclarativeMacroExpander,
+) -> usize {
+    let crate::declarative::DeclarativeMacroExpander { mac, transparency: _, edition: _ } =
+        expander;
+    mac.heap_size()
+}
+
 /// The `ThinVec` behind several censored attributes: its two-word header and
 /// the elements, by capacity. A single attribute is inline, and an empty
 /// `ThinVec` points at a shared static header and owns nothing.

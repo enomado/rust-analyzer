@@ -75,6 +75,41 @@ impl MetaTemplate {
         self.0.iter()
     }
 
+    /// Requested heap bytes of this tree; see `DeclarativeMacro::heap_size`.
+    ///
+    /// Tokens hold interned `Symbol`s and no buffer of their own. A
+    /// repetition's separator is behind an `Arc` made once per `Op::Repeat`
+    /// at parse time and charged to it; a macro is not cloned, so nothing else
+    /// shares it.
+    pub(crate) fn heap_size(&self) -> usize {
+        let ops = size_of_val::<[Op]>(&self.0);
+        ops + self
+            .0
+            .iter()
+            .map(|op| match op {
+                Op::Var { name: _, kind: _, id: _ }
+                | Op::Ignore { name: _, id: _ }
+                | Op::Index { depth: _ }
+                | Op::Len { depth: _ }
+                | Op::Count { name: _, depth: _ }
+                | Op::Literal(_)
+                | Op::Ident(_) => 0,
+                Op::Concat { elements, span: _ } => {
+                    size_of_val::<[ConcatMetaVarExprElem]>(elements)
+                }
+                Op::Repeat { tokens, kind: _, separator } => {
+                    // `ArcInner`: the two counts, then the value.
+                    tokens.heap_size()
+                        + separator
+                            .as_ref()
+                            .map_or(0, |_| 2 * size_of::<usize>() + size_of::<Separator>())
+                }
+                Op::Subtree { tokens, delimiter: _ } => tokens.heap_size(),
+                Op::Punct(_) => size_of::<ArrayVec<tt::Punct, MAX_GLUED_PUNCT_LEN>>(),
+            })
+            .sum::<usize>()
+    }
+
     fn parse(
         edition: impl Copy + Fn(SyntaxContext) -> Edition,
         mut src: TtIter<'_>,

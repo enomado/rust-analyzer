@@ -303,6 +303,9 @@ impl RootDatabase {
         // since settled on 512.
         apply(self, "HirFileId::ast_id_map_", lru_capacity.saturating_mul(8));
         apply(self, "Body::with_source_map_", 512);
+        // Capped by bur, not upstream; see the `lru` attribute on `Body::of` in
+        // hir-def for what an evicted body costs.
+        apply(self, "Body::of_", 2048);
         // Capped by bur, not upstream; see the `lru` attribute on
         // `StructSignature::with_source_map` in hir-def.
         for query in [

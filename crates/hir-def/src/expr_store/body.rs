@@ -9,7 +9,7 @@ use syntax::{SyntaxNodePtr, ast};
 use triomphe::Arc;
 
 use crate::{
-    DefWithBodyId, ExpressionStoreOwnerId, HasModule,
+    BlockId, DefWithBodyId, ExpressionStoreOwnerId, HasModule,
     expr_store::{
         ExpressionStore, ExpressionStoreSourceMap, SelfParamPtr, lower::lower_body, pretty,
     },
@@ -139,9 +139,33 @@ impl Body {
         (Arc::new(body), source_map)
     }
 
-    #[salsa::tracked(returns(deref), heap_size = crate::expr_store::heap_size::body_of)]
+    /// LRU-capped in bur (upstream keeps the body of every function anything
+    /// ever lowered: on a 2455-crate workspace the symbol index alone lowers
+    /// ≈ 70 thousand of them, 0.36 GB that nothing reads again until that
+    /// function is analysed). What the cap costs is the firewall, and only for
+    /// an evicted body: an edit anywhere in the file re-runs the producer above
+    /// (and, evicted, it cannot backdate), and this query is where that stops
+    /// — it compares the fresh body by value. An evicted body has no old value,
+    /// so its readers re-run as well: scopes, inference, the symbol index of
+    /// its module, and the impl index of its crate when the body is an unnamed
+    /// `const _`. Reading an evicted body again costs a lowering (plus the
+    /// file's parse, if that was evicted too).
+    #[salsa::tracked(returns(deref), lru = 2048, heap_size = crate::expr_store::heap_size::body_of)]
     pub fn of(db: &dyn SourceDatabase, def: DefWithBodyId) -> Arc<Body> {
         Self::with_source_map(db, def).0.clone()
+    }
+
+    /// The blocks of the body that define items — all that the symbol index and
+    /// the impl indexes of a crate read from a body (bur). They read it from
+    /// every body of a module or every unnamed `const _` of a crate, so they
+    /// must not depend on [`Body::of`] directly: an evicted body re-runs its
+    /// readers on any edit to its file, and re-running a crate's impl index
+    /// lowers again every evicted `const _` body in the crate — which means
+    /// re-expanding every derive that emitted one. This query is not capped
+    /// and holds a few ids at most, so it backdates where `of` cannot.
+    #[salsa::tracked(returns(ref), heap_size = crate::expr_store::heap_size::block_scopes)]
+    pub fn block_scopes(db: &dyn SourceDatabase, def: DefWithBodyId) -> Box<[BlockId]> {
+        Self::of(db, def).block_ids().into()
     }
 }
 

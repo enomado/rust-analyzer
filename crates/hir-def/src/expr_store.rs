@@ -601,12 +601,12 @@ impl ExpressionStore {
         &'a self,
         db: &'a dyn SourceDatabase,
     ) -> impl Iterator<Item = (BlockId, &'a DefMap)> + 'a {
-        self.expr_only
-            .as_ref()
-            .map(|it| &*it.block_scopes)
-            .unwrap_or_default()
-            .iter()
-            .map(move |&block| (block, block_def_map(db, block)))
+        self.block_ids().iter().map(move |&block| (block, block_def_map(db, block)))
+    }
+
+    /// The block expressions in this store that define inner items.
+    pub fn block_ids(&self) -> &[BlockId] {
+        self.expr_only.as_ref().map(|it| &*it.block_scopes).unwrap_or_default()
     }
 
     pub fn walk_bindings_in_pat(&self, pat_id: PatId, mut f: impl FnMut(BindingId)) {

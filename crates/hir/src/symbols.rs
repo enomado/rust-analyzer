@@ -9,7 +9,7 @@ use hir_def::{
     Lookup, MacroId, ModuleDefId, ModuleId, TraitId,
     expr_store::Body,
     item_scope::{ImportId, ImportOrExternCrate, ImportOrGlob},
-    nameres::crate_def_map,
+    nameres::{block_def_map, crate_def_map},
     per_ns::Item,
     signatures::{EnumSignature, ImplSignature, TraitSignature},
     src::{HasChildSource, HasSource},
@@ -413,11 +413,11 @@ impl<'a> SymbolCollector<'a> {
             return;
         }
         let body_id = body_id.into();
-        let body = Body::of(self.db, body_id);
 
         // Descend into the blocks and enqueue collection of all modules within.
-        for (_, def_map) in body.blocks(self.db) {
-            for (id, _) in def_map.modules() {
+        // Through `Body::block_scopes`, not the body: see there (bur).
+        for &block in Body::block_scopes(self.db, body_id) {
+            for (id, _) in block_def_map(self.db, block).modules() {
                 self.work.push(SymbolCollectorWork { module_id: id, parent: name.clone() });
             }
         }

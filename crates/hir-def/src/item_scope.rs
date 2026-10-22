@@ -173,14 +173,21 @@ pub struct ItemScope {
 
 impl ItemScope {
     /// The buffers one module's scope owns, for the `heap_size` of the def map
-    /// that holds it. See [`crate::heap_size`] for what such a number includes.
+    /// that holds it (see [`crate::heap_size`] for what such a number
+    /// includes), field by field: one call of `row` per field, plus one per
+    /// field whose values own buffers of their own. Every `heap_size` of the
+    /// def map side is the sum of these rows, and
+    /// [`crate::heap_size::DefMapCensus`] keeps them apart — one walk, so the
+    /// total and its breakdown cannot drift.
     ///
     /// Destructured rather than field-by-field so that a field added upstream
     /// stops the build here instead of silently going uncounted. A scope is
     /// almost entirely maps, and there are twenty of them — which is why the
     /// def map is worth weighing at all.
-    pub(crate) fn heap_size(&self) -> usize {
-        use crate::heap_size::{hash_map, hash_map_with, hash_set, index_map, small_vec, thin_vec};
+    pub(crate) fn weigh(&self, row: &mut dyn FnMut(&'static str, crate::heap_size::Weight)) {
+        use crate::heap_size::{
+            hash_map_weight, hash_set_weight, index_map_weight, small_vec_weight, thin_vec_weight,
+        };
 
         let ItemScope {
             types,
@@ -205,34 +212,67 @@ impl ItemScope {
         } = self;
 
         // `Name` is an interned symbol, so every key here is a plain id.
-        index_map(types)
-            + index_map(values)
-            + index_map(macros)
-            + hash_set(unresolved)
-            + thin_vec(declarations)
-            + thin_vec(impls)
-            + thin_vec(builtin_derive_impls)
-            + thin_vec(extern_blocks)
-            + thin_vec(unnamed_consts)
-            + thin_vec(unnamed_trait_imports)
-            + hash_map(use_imports_types)
-            + hash_map(use_imports_values)
-            + hash_map(use_imports_macros)
-            + thin_vec(use_decls)
-            + thin_vec(extern_crate_decls)
-            + hash_map_with(legacy_macros, small_vec)
-            + hash_map(attr_macros)
-            + hash_map(macro_invocations)
-            // Two levels of `SmallVec`: the invocations for one item, and the
-            // derive calls within each. Both are inline until they spill, and
-            // `small_vec` charges nothing while they have not.
-            + hash_map_with(derive_macros, |invocations| {
-                small_vec(invocations)
-                    + invocations
-                        .iter()
-                        .map(|invocation| small_vec(&invocation.derive_call_ids))
-                        .sum::<usize>()
-            })
+        row("scope.types", index_map_weight(types));
+        row("scope.values", index_map_weight(values));
+        row("scope.macros", index_map_weight(macros));
+        row("scope.unresolved", hash_set_weight(unresolved));
+        row("scope.declarations", thin_vec_weight(declarations));
+        row("scope.impls", thin_vec_weight(impls));
+        row("scope.builtin_derive_impls", thin_vec_weight(builtin_derive_impls));
+        row("scope.extern_blocks", thin_vec_weight(extern_blocks));
+        row("scope.unnamed_consts", thin_vec_weight(unnamed_consts));
+        row("scope.unnamed_trait_imports", thin_vec_weight(unnamed_trait_imports));
+        row("scope.use_imports_types", hash_map_weight(use_imports_types));
+        row("scope.use_imports_values", hash_map_weight(use_imports_values));
+        row("scope.use_imports_macros", hash_map_weight(use_imports_macros));
+        row("scope.use_decls", thin_vec_weight(use_decls));
+        row("scope.extern_crate_decls", thin_vec_weight(extern_crate_decls));
+        row("scope.legacy_macros", hash_map_weight(legacy_macros));
+        for macros in legacy_macros.values() {
+            row("scope.legacy_macros (spilled)", small_vec_weight(macros));
+        }
+        row("scope.attr_macros", hash_map_weight(attr_macros));
+        row("scope.macro_invocations", hash_map_weight(macro_invocations));
+        // Two levels of `SmallVec`: the invocations for one item, and the
+        // derive calls within each. Both are inline until they spill, and
+        // `small_vec` charges nothing while they have not.
+        row("scope.derive_macros", hash_map_weight(derive_macros));
+        for invocations in derive_macros.values() {
+            row("scope.derive_macros (spilled)", small_vec_weight(invocations));
+            for invocation in invocations {
+                row("scope.derive_macros (spilled)", small_vec_weight(&invocation.derive_call_ids));
+            }
+        }
+    }
+
+    /// Calls `entry` once per name in `types`, `values` and `macros` with
+    /// where it came from — a module's own, or a copy a `use` (single or glob)
+    /// or `extern crate` put there. Glob copies are the suspect: every
+    /// `use super::*` repeats the parent's names in the child.
+    pub(crate) fn count_entries_by_origin(&self, entry: &mut dyn FnMut(&'static str)) {
+        for item in self.types.values() {
+            entry(match item.import {
+                None => "types own",
+                Some(ImportOrExternCrate::Import(_)) => "types import",
+                Some(ImportOrExternCrate::Glob(_)) => "types glob",
+                Some(ImportOrExternCrate::ExternCrate(_)) => "types extern crate",
+            });
+        }
+        for item in self.values.values() {
+            entry(match item.import {
+                None => "values own",
+                Some(ImportOrGlob::Import(_)) => "values import",
+                Some(ImportOrGlob::Glob(_)) => "values glob",
+            });
+        }
+        for item in self.macros.values() {
+            entry(match item.import {
+                None => "macros own",
+                Some(ImportOrExternCrate::Import(_)) => "macros import",
+                Some(ImportOrExternCrate::Glob(_)) => "macros glob",
+                Some(ImportOrExternCrate::ExternCrate(_)) => "macros extern crate",
+            });
+        }
     }
 }
 

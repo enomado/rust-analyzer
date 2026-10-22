@@ -93,10 +93,58 @@ pub fn arena_map_with<T, V>(map: &ArenaMap<Idx<T>, V>, per_value: impl Fn(&V) ->
     map.values().map(|value| size_of::<Option<V>>() + per_value(value)).sum()
 }
 
-/// hashbrown allocates for `capacity`, not for `len`, and keeps one control
-/// byte per bucket beside the bucket itself.
+/// The one allocation of a hashbrown table of `buckets` slots of `T` (`std`'s
+/// `HashMap`/`HashSet` and `indexmap`'s index table are all hashbrown): the
+/// slots, padded to the control bytes' alignment, then one control byte per
+/// slot plus a trailing group that mirrors the first, so a probe can read a
+/// whole group at any position. A table with no buckets is a shared static.
+///
+/// The group is 16 bytes wide where hashbrown probes with SSE2 and 8 where it
+/// probes a `u64` (NEON included); the allocator oracle confirms the former.
+fn hash_table_bytes(buckets: usize, slot: usize) -> usize {
+    const GROUP_WIDTH: usize = if cfg!(all(
+        target_feature = "sse2",
+        any(target_arch = "x86", target_arch = "x86_64"),
+        not(miri)
+    )) {
+        16
+    } else {
+        8
+    };
+    if buckets == 0 {
+        return 0;
+    }
+    let control_align = GROUP_WIDTH;
+    let slots = (buckets * slot).next_multiple_of(control_align);
+    slots + buckets + GROUP_WIDTH
+}
+
+/// How many buckets a hashbrown table that reports `capacity` has: it keeps
+/// one bucket free below 8 buckets and an eighth free above.
+fn hash_table_buckets(capacity: usize) -> usize {
+    match capacity {
+        0 => 0,
+        1..8 => capacity + 1,
+        _ => capacity / 7 * 8,
+    }
+}
+
+/// How many buckets hashbrown gives a table sized for `len` elements — what
+/// `with_capacity(len)` and `shrink_to_fit` produce, and so the fewest any
+/// table holding `len` elements can have.
+fn hash_table_buckets_for(len: usize) -> usize {
+    match len {
+        0 => 0,
+        1..4 => 4,
+        4..8 => 8,
+        _ => (len * 8 / 7).next_power_of_two(),
+    }
+}
+
+/// hashbrown allocates for its buckets, not for `len`; see [`hash_table_bytes`].
+/// `capacity()` names the bucket count exactly, so this is exact.
 pub fn hash_map<K, V, S: BuildHasher>(map: &HashMap<K, V, S>) -> usize {
-    map.capacity() * (size_of::<(K, V)>() + 1)
+    hash_table_bytes(hash_table_buckets(map.capacity()), size_of::<(K, V)>())
 }
 
 /// [`hash_map`] for a map whose values own heap of their own.
@@ -107,22 +155,30 @@ pub fn hash_map_with<K, V, S: BuildHasher>(
     hash_map(map) + map.values().map(per_value).sum::<usize>()
 }
 
-/// A set is a map to `()`; hashbrown stores the same control byte per bucket.
+/// A set is a map to `()`: the same table.
 pub fn hash_set<T>(set: &FxHashSet<T>) -> usize {
-    set.capacity() * (size_of::<T>() + 1)
+    hash_table_bytes(hash_table_buckets(set.capacity()), size_of::<T>())
 }
 
-/// An `IndexMap` is a `Vec` of `{hash, key, value}` buckets beside a hashbrown
-/// table of positions into it. Neither the bucket type nor the table is
-/// nameable from here, so this counts the entry vector as
-/// `capacity * (usize + K + V)` and leaves the index table and any bucket
-/// padding out — lower bound, as everywhere else.
+/// An `IndexMap` is a `Vec` of `{hash, key, value}` entries beside a hashbrown
+/// table of `usize` positions into it — two allocations. `capacity()` is the
+/// smaller of the two capacities, and neither is exposed alone, so both are
+/// sized from what can be known: the entry vector from `capacity()`, the
+/// index table from `len()` (the fewest buckets that hold it). Both are exact
+/// for a map that was shrunk to fit — every map in a finished def map is —
+/// and a lower bound otherwise.
+///
+/// The index table was left out until 2026-10: on a large workspace's def maps
+/// that was 5.9 million names at ≈ 10–20 bytes each.
 ///
 /// Generic over the hasher, not written against [`crate::FxIndexMap`]: `base-db`
 /// spells the same alias with `BuildHasherDefault<FxHasher>` where this crate
 /// uses `FxBuildHasher`, and those are two distinct types.
 pub fn index_map<K, V, S>(map: &IndexMap<K, V, S>) -> usize {
-    map.capacity() * (size_of::<usize>() + size_of::<K>() + size_of::<V>())
+    // The entry is `indexmap::Bucket { hash: HashValue(usize), key, value }`,
+    // which is not nameable here; a tuple of the same fields lays out the same.
+    map.capacity() * size_of::<(usize, K, V)>()
+        + hash_table_bytes(hash_table_buckets_for(map.len()), size_of::<usize>())
 }
 
 /// [`index_map`] for a map whose values own heap of their own.
@@ -156,6 +212,130 @@ pub fn thin_vec<T>(vec: &ThinVec<T>) -> usize {
 /// and forget the box itself.
 pub fn boxed<T>(value: &Option<Box<T>>, owned: impl Fn(&T) -> usize) -> usize {
     value.as_ref().map_or(0, |value| size_of::<T>() + owned(value))
+}
+
+// -------------------------------------------------------------------- census
+
+/// One container's — or one field's, summed over many values — share of a
+/// heap: what the `heap_size` arithmetic above charges for it, and what the
+/// stored elements alone would take. The gap between the two is spare
+/// capacity, which is the question a census asks and a total cannot answer.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Weight {
+    /// Containers that own an allocation; an empty map or vector owns none.
+    pub containers: usize,
+    /// Elements stored.
+    pub entries: usize,
+    /// `entries` slots and nothing else (for hashbrown, with the control
+    /// byte): the floor any layout of the same elements would pay.
+    pub filled_bytes: usize,
+    /// What `heap_size` charges: capacity, not fill.
+    pub bytes: usize,
+}
+
+impl std::ops::AddAssign for Weight {
+    fn add_assign(&mut self, other: Weight) {
+        let Weight { containers, entries, filled_bytes, bytes } = other;
+        self.containers += containers;
+        self.entries += entries;
+        self.filled_bytes += filled_bytes;
+        self.bytes += bytes;
+    }
+}
+
+impl Weight {
+    fn of(len: usize, slot: usize, bytes: usize) -> Weight {
+        Weight { containers: usize::from(bytes > 0), entries: len, filled_bytes: len * slot, bytes }
+    }
+}
+
+/// [`hash_map`] as a [`Weight`].
+pub fn hash_map_weight<K, V, S: BuildHasher>(map: &HashMap<K, V, S>) -> Weight {
+    Weight::of(map.len(), size_of::<(K, V)>() + 1, hash_map(map))
+}
+
+/// [`hash_set`] as a [`Weight`].
+pub fn hash_set_weight<T>(set: &FxHashSet<T>) -> Weight {
+    Weight::of(set.len(), size_of::<T>() + 1, hash_set(set))
+}
+
+/// [`index_map`] as a [`Weight`].
+pub fn index_map_weight<K, V, S>(map: &IndexMap<K, V, S>) -> Weight {
+    Weight::of(map.len(), size_of::<(usize, K, V)>(), index_map(map))
+}
+
+/// [`vec`] as a [`Weight`].
+pub fn vec_weight<T>(vec: &Vec<T>) -> Weight {
+    Weight::of(vec.len(), size_of::<T>(), self::vec(vec))
+}
+
+/// [`thin_vec`] as a [`Weight`].
+pub fn thin_vec_weight<T>(vec: &ThinVec<T>) -> Weight {
+    Weight::of(vec.len(), size_of::<T>(), thin_vec(vec))
+}
+
+/// [`small_vec`] as a [`Weight`]: a vector still inline is no container here.
+pub fn small_vec_weight<A: smallvec::Array>(vec: &SmallVec<A>) -> Weight {
+    let bytes = small_vec(vec);
+    Weight::of(if bytes > 0 { vec.len() } else { 0 }, size_of::<A::Item>(), bytes)
+}
+
+/// [`slice`] as a [`Weight`]; a boxed slice has no spare capacity.
+pub fn slice_weight<T>(slice: &[T]) -> Weight {
+    Weight::of(slice.len(), size_of::<T>(), self::slice(slice))
+}
+
+/// What def maps own, field by field — the same rows `heap_size` sums, kept
+/// apart. Built for one question: of the bytes a workspace's def maps hold,
+/// how much is spare capacity, which field holds it, and how many of the
+/// names in item scopes are a module's own against copies a `use` brought in.
+///
+/// Rows are named `<owner>.<field>`; `scope.*` sums the item scopes of every
+/// module of every def map added. A field whose values own buffers of their
+/// own gets a second row for those (`… (spilled)`, `… (names)`).
+#[derive(Debug, Default)]
+pub struct DefMapCensus {
+    pub def_maps: usize,
+    pub modules: usize,
+    pub rows: std::collections::BTreeMap<&'static str, Weight>,
+    /// Entries of the `types`/`values`/`macros` maps of item scopes by how
+    /// the name got there: `<ns> own` (declared or expanded in the module),
+    /// `<ns> import`, `<ns> glob`, `<ns> extern crate`.
+    pub scope_entries_by_origin: std::collections::BTreeMap<&'static str, usize>,
+}
+
+impl DefMapCensus {
+    /// Adds a crate's def map *and* the crate-local half that
+    /// `crate_local_def_map` keeps beside it — together, the `DefMapPair`
+    /// row of a memory report.
+    pub fn add_crate(&mut self, db: &dyn base_db::SourceDatabase, krate: base_db::Crate) {
+        let pair = crate::nameres::crate_local_def_map(db, krate);
+        self.add_def_map(pair.def_map(db));
+        pair.local(db).weigh(&mut |row, weight| self.add_row(row, weight));
+    }
+
+    /// Adds one def map, a crate's or a block's; a block's does not pay for
+    /// the crate data it shares (see [`DefMap::heap_size`]).
+    pub fn add_def_map(&mut self, map: &DefMap) {
+        self.def_maps += 1;
+        self.modules += map.modules.len();
+        map.weigh(&mut |row, weight| self.add_row(row, weight));
+        for (_, module) in map.modules.iter() {
+            module.scope.count_entries_by_origin(&mut |origin| {
+                *self.scope_entries_by_origin.entry(origin).or_default() += 1
+            });
+        }
+    }
+
+    fn add_row(&mut self, row: &'static str, weight: Weight) {
+        *self.rows.entry(row).or_default() += weight;
+    }
+
+    /// Everything the rows charge — what `heap_size` reports for the same
+    /// def maps.
+    pub fn bytes(&self) -> usize {
+        self.rows.values().map(|weight| weight.bytes).sum()
+    }
 }
 
 #[cfg(test)]
@@ -484,6 +664,36 @@ m!(a);
             (impl_objects, body_objects),
             "evicting the producer took objects out of the report that `of` still holds"
         );
+    }
+
+    /// The census is `heap_size`'s own walk with the rows kept apart: they add
+    /// up to what the `DefMapPair` reports, and the names a glob import copies
+    /// into a module are told apart from the module's own.
+    #[test]
+    fn the_def_map_census_adds_up_to_the_pair_and_counts_glob_copies() {
+        use crate::{heap_size::DefMapCensus, nameres::crate_local_def_map};
+
+        // Unit structs, so each name lands in two namespaces: types and values.
+        let structs = (0..50).map(|i| format!("pub struct S{i};\n")).collect::<String>();
+        let db = TestDB::with_files(&format!(
+            "//- /lib.rs\nmod a {{\n{structs}}}\nmod b {{ use super::a::*; }}\n"
+        ));
+        let krate = db.fetch_test_crate();
+        let mut census = DefMapCensus::default();
+        census.add_crate(&db, krate);
+
+        let pair = crate_local_def_map(&db, krate);
+        // What `def_map_pair` sums for the tracked struct's two fields.
+        let reported = pair.def_map(&db).heap_size() + pair.local(&db).heap_size();
+        assert_eq!(census.bytes(), reported, "the census rows do not add up to the pair's heap");
+        assert_eq!((census.def_maps, census.modules), (1, 3), "positive control: root, a, b");
+        let origin = |key: &str| census.scope_entries_by_origin.get(key).copied().unwrap_or(0);
+        assert_eq!(
+            (origin("types glob"), origin("values glob")),
+            (50, 50),
+            "`use super::a::*` copies 50 names into each namespace of `b`"
+        );
+        assert_eq!(origin("types own"), 52, "50 structs in `a`, `a` and `b` in the root");
     }
 
     /// Nearly everything a def map owns hangs off the item scopes of its

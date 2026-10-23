@@ -188,13 +188,14 @@ impl<'db> SourceToDefCache<'db> {
 pub(super) struct SourceToDefCtx<'db, 'cache> {
     pub(super) db: &'db dyn HirDatabase,
     pub(super) cache: &'cache mut SourceToDefCache<'db>,
+    pub(super) preferred_crate: Option<base_db::Crate>,
 }
 
 impl<'db> SourceToDefCtx<'db, '_> {
     pub(super) fn file_to_def(&mut self, file: FileId) -> &SmallVec<[ModuleId; 1]> {
         let _p = tracing::info_span!("SourceToDefCtx::file_to_def").entered();
         self.cache.file_to_def_cache.entry(file).or_insert_with(|| {
-            let mut mods = SmallVec::new();
+            let mut mods: SmallVec<[ModuleId; 1]> = SmallVec::new();
 
             for &crate_id in relevant_crates(self.db, file) {
                 // Note: `mod` declarations in block modules cannot be supported here
@@ -220,6 +221,11 @@ impl<'db> SourceToDefCtx<'db, '_> {
                             }),
                     );
                 }
+            }
+            if let Some(preferred) = self.preferred_crate
+                && mods.iter().any(|module| module.krate(self.db) == preferred)
+            {
+                mods.retain(|module| module.krate(self.db) == preferred);
             }
             if mods.is_empty() {
                 // FIXME: detached file

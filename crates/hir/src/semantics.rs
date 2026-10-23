@@ -170,6 +170,7 @@ type DefAnonConstsMap<'db> = FxHashMap<DefWithoutBodyWithAnonConsts, ExprToAnonC
 
 pub struct SemanticsImpl<'db> {
     pub db: &'db dyn HirDatabase,
+    preferred_crate: Option<base_db::Crate>,
     s2d_cache: RefCell<SourceToDefCache<'db>>,
     /// MacroCall to its expansion's MacroCallId cache
     macro_call_cache: RefCell<FxHashMap<InFile<ast::MacroCall>, MacroCallId>>,
@@ -216,6 +217,19 @@ impl<DB: HirDatabase> Semantics<'_, DB> {
     pub fn new(db: &DB) -> Semantics<'_, DB> {
         let impl_ = SemanticsImpl::new(db);
         Semantics { db, imp: impl_ }
+    }
+
+    /// Resolve shared source files in this compilation context when they
+    /// belong to it. Sources belonging only to dependencies still resolve in
+    /// their own crate. Each instance owns its context-specific source cache.
+    ///
+    /// This mirrors rustc's per-Compiler Session/Config (input and crate cfg),
+    /// rather than treating a physical file as one compilation unit:
+    /// https://doc.rust-lang.org/nightly/nightly-rustc/src/rustc_interface/interface.rs.html
+    pub fn new_for_crate(db: &DB, krate: Crate) -> Semantics<'_, DB> {
+        let mut imp = SemanticsImpl::new(db);
+        imp.preferred_crate = Some(krate.id);
+        Semantics { db, imp }
     }
 }
 
@@ -462,6 +476,7 @@ impl<'db> SemanticsImpl<'db> {
     fn new(db: &'db dyn HirDatabase) -> Self {
         SemanticsImpl {
             db,
+            preferred_crate: None,
             s2d_cache: Default::default(),
             macro_call_cache: Default::default(),
             signature_anon_consts_cache: Default::default(),
@@ -2114,7 +2129,9 @@ impl<'db> SemanticsImpl<'db> {
     }
 
     fn with_ctx<F: FnOnce(&mut SourceToDefCtx<'db, '_>) -> T, T>(&self, f: F) -> T {
-        let mut ctx = SourceToDefCtx { db: self.db, cache: &mut self.s2d_cache.borrow_mut() };
+        let mut ctx = SourceToDefCtx {
+            db: self.db, cache: &mut self.s2d_cache.borrow_mut(), preferred_crate: self.preferred_crate,
+        };
         f(&mut ctx)
     }
 

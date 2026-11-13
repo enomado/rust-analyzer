@@ -101,9 +101,13 @@ fn glb(v1: Variance, v2: Variance) -> Variance {
     }
 }
 
+// salsa hands the head's previous provisional value in so an initializer can
+// resume from it; variance starts from the bottom (all bivariant) every time,
+// as it did before salsa offered the value.
 pub(crate) fn variances_of_cycle_initial(
     db: &dyn HirDatabase,
     _: salsa::Id,
+    _last_provisional_value: Option<&StoredVariancesOf>,
     def: GenericDefId,
 ) -> StoredVariancesOf {
     let generics = generics(db, def);

@@ -36,12 +36,17 @@
 //! is shared with every block def map in that crate, and charging all of them
 //! would multiply one allocation by the thousands.
 
-use std::{collections::HashMap, hash::BuildHasher, mem::size_of};
+use std::{
+    collections::HashMap,
+    hash::{BuildHasher, Hash},
+    mem::size_of,
+};
 
 use indexmap::IndexMap;
 use la_arena::{Arena, ArenaMap, Idx};
 use rustc_hash::FxHashSet;
 use smallvec::SmallVec;
+use stdx::thin_map::{ThinHashMap, ThinHashSet, ThinMapStorage};
 use thin_vec::ThinVec;
 
 use crate::{item_tree::ItemTree, nameres::DefMap, nameres::LocalDefMap};
@@ -160,6 +165,36 @@ pub fn hash_set<T>(set: &FxHashSet<T>) -> usize {
     hash_table_bytes(hash_table_buckets(set.capacity()), size_of::<T>())
 }
 
+/// A `ThinHashMap` keeps its first few entries in an inline `ThinVec` and only
+/// past that switches to a boxed hashbrown map. Each half is weighed the way
+/// its own container is ([`thin_vec`], [`hash_map`]), and the box pays for the
+/// map value it points at.
+pub fn thin_hash_map<K: Hash + Eq, V, S: BuildHasher + Default>(
+    map: &ThinHashMap<K, V, S>,
+) -> usize {
+    thin_storage(map.storage())
+}
+
+/// [`thin_hash_map`] for a map whose values own heap of their own.
+pub fn thin_hash_map_with<K: Hash + Eq, V, S: BuildHasher + Default>(
+    map: &ThinHashMap<K, V, S>,
+    per_value: impl Fn(&V) -> usize,
+) -> usize {
+    thin_hash_map(map) + map.values().map(per_value).sum::<usize>()
+}
+
+/// A `ThinHashSet` is a [`thin_hash_map`] to `()`.
+pub fn thin_hash_set<T: Hash + Eq, S: BuildHasher + Default>(set: &ThinHashSet<T, S>) -> usize {
+    thin_storage(set.storage())
+}
+
+fn thin_storage<K, V, S: BuildHasher>(storage: ThinMapStorage<'_, HashMap<K, V, S>>) -> usize {
+    match storage {
+        ThinMapStorage::Thin { allocated_entries, entry_size } => allocated_entries * entry_size,
+        ThinMapStorage::Map(map) => size_of::<HashMap<K, V, S>>() + hash_map(map),
+    }
+}
+
 /// An `IndexMap` is a `Vec` of `{hash, key, value}` entries beside a hashbrown
 /// table of `usize` positions into it — two allocations. `capacity()` is the
 /// smaller of the two capacities, and neither is exposed alone, so both are
@@ -257,6 +292,33 @@ pub fn hash_map_weight<K, V, S: BuildHasher>(map: &HashMap<K, V, S>) -> Weight {
 /// [`hash_set`] as a [`Weight`].
 pub fn hash_set_weight<T>(set: &FxHashSet<T>) -> Weight {
     Weight::of(set.len(), size_of::<T>() + 1, hash_set(set))
+}
+
+/// [`thin_hash_map`] as a [`Weight`]. A slot is an inline entry while the map
+/// is still a `ThinVec`, and a hashbrown bucket with its control byte once it
+/// has spilled into a table.
+pub fn thin_hash_map_weight<K: Hash + Eq, V, S: BuildHasher + Default>(
+    map: &ThinHashMap<K, V, S>,
+) -> Weight {
+    thin_storage_weight(map.len(), map.storage())
+}
+
+/// [`thin_hash_set`] as a [`Weight`].
+pub fn thin_hash_set_weight<T: Hash + Eq, S: BuildHasher + Default>(
+    set: &ThinHashSet<T, S>,
+) -> Weight {
+    thin_storage_weight(set.len(), set.storage())
+}
+
+fn thin_storage_weight<K, V, S: BuildHasher>(
+    len: usize,
+    storage: ThinMapStorage<'_, HashMap<K, V, S>>,
+) -> Weight {
+    let slot = match storage {
+        ThinMapStorage::Thin { entry_size, .. } => entry_size,
+        ThinMapStorage::Map(_) => size_of::<(K, V)>() + 1,
+    };
+    Weight::of(len, slot, thin_storage(storage))
 }
 
 /// [`index_map`] as a [`Weight`].

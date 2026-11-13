@@ -528,7 +528,7 @@ impl DefMap {
     /// [`Self::heap_size`] by field; see [`ItemScope::weigh`]. The module
     /// rows sum over every module of the map.
     pub(crate) fn weigh(&self, row: &mut dyn FnMut(&'static str, crate::heap_size::Weight)) {
-        use crate::heap_size::{Weight, hash_map_weight, index_map_weight, vec_weight};
+        use crate::heap_size::{Weight, thin_hash_map_weight, thin_vec_weight, vec_weight};
 
         let DefMap {
             krate: _,
@@ -549,17 +549,17 @@ impl DefMap {
             data.weigh(row);
         }
 
-        row("modules", index_map_weight(&modules.inner));
+        row("modules", thin_hash_map_weight(&modules.inner));
         for module in modules.inner.values() {
             module.weigh(row);
         }
-        row("macro_use_prelude", hash_map_weight(macro_use_prelude));
-        row("derive_helpers_in_scope", hash_map_weight(derive_helpers_in_scope));
+        row("macro_use_prelude", thin_hash_map_weight(macro_use_prelude));
+        row("derive_helpers_in_scope", thin_hash_map_weight(derive_helpers_in_scope));
         for helpers in derive_helpers_in_scope.values() {
             row("derive_helpers_in_scope (helpers)", vec_weight(helpers));
         }
-        row("macro_def_to_macro_id", hash_map_weight(macro_def_to_macro_id));
-        row("diagnostics", vec_weight(diagnostics));
+        row("macro_def_to_macro_id", thin_hash_map_weight(macro_def_to_macro_id));
+        row("diagnostics", thin_vec_weight(diagnostics));
     }
 
     fn empty(
@@ -860,7 +860,7 @@ impl ModuleData {
     /// all of it is the item scope.
     fn weigh(&self, row: &mut dyn FnMut(&'static str, crate::heap_size::Weight)) {
         let ModuleData { origin: _, visibility: _, parent: _, children, scope } = self;
-        row("module.children", crate::heap_size::index_map_weight(children));
+        row("module.children", crate::heap_size::thin_hash_map_weight(children));
         scope.weigh(row);
     }
 

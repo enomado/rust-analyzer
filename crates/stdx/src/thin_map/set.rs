@@ -1,6 +1,6 @@
 use std::{borrow::Borrow, hash::Hash};
 
-use crate::thin_map::{Map, ThinMap};
+use crate::thin_map::{Map, ThinMap, ThinMapStorage};
 
 #[expect(clippy::disallowed_types)]
 pub type ThinHashSet<T, S> = ThinSet<T, std::collections::HashMap<T, (), S>>;
@@ -32,6 +32,11 @@ impl<T: Hash + Eq, M: Map<T, ()>> ThinSet<T, M> {
     #[inline]
     pub fn is_empty(&self) -> bool {
         self.map.is_empty()
+    }
+
+    /// [`ThinMap::storage`] of the underlying map to `()`.
+    pub fn storage(&self) -> ThinMapStorage<'_, M> {
+        self.map.storage()
     }
 
     #[inline]

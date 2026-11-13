@@ -54,8 +54,8 @@ use crate::{
     // The container arithmetic is shared with the crate's other `heap_size`
     // entry points, and lives beside them.
     heap_size::{
-        arena, arena_map, arena_map_with, boxed, hash_map, hash_map_with, slice, small_vec,
-        thin_vec, vec,
+        arena, arena_map, arena_map_with, boxed, slice, small_vec, thin_hash_map,
+        thin_hash_map_with, thin_vec, vec,
     },
     hir::generics::GenericParams,
     signatures::{
@@ -168,9 +168,9 @@ fn expr_only_store_heap(store: &ExpressionOnlyStore) -> usize {
         + arena(&store.pats)
         + arena(&store.bindings)
         + arena(&store.labels)
-        + hash_map(&store.binding_owners)
+        + thin_hash_map(&store.binding_owners)
         + slice(&store.block_scopes)
-        + hash_map(&store.ident_hygiene)
+        + thin_hash_map(&store.ident_hygiene)
         + small_vec(&store.expr_roots)
 }
 
@@ -180,31 +180,31 @@ fn source_map_heap(source_map: &BodySourceMap) -> usize {
 
 fn store_source_map_heap(source_map: &ExpressionStoreSourceMap) -> usize {
     arena_map(&source_map.types_map_back)
-        + hash_map(&source_map.types_map)
+        + thin_hash_map(&source_map.types_map)
         + arena_map(&source_map.lifetime_map_back)
-        + hash_map(&source_map.lifetime_map)
+        + thin_hash_map(&source_map.lifetime_map)
         + boxed(&source_map.expr_only, expr_only_source_map_heap)
 }
 
 fn expr_only_source_map_heap(source_map: &ExpressionOnlySourceMap) -> usize {
-    hash_map(&source_map.expr_map)
+    thin_hash_map(&source_map.expr_map)
         + arena_map(&source_map.expr_map_back)
-        + hash_map(&source_map.pat_map)
+        + thin_hash_map(&source_map.pat_map)
         + arena_map(&source_map.pat_map_back)
-        + hash_map(&source_map.label_map)
+        + thin_hash_map(&source_map.label_map)
         + arena_map(&source_map.label_map_back)
         + arena_map_with(&source_map.binding_definitions, small_vec)
-        + hash_map(&source_map.field_map_back)
-        + hash_map(&source_map.pat_field_map_back)
+        + thin_hash_map(&source_map.field_map_back)
+        + thin_hash_map(&source_map.pat_field_map_back)
         + boxed(&source_map.template_map, format_template_heap)
-        + hash_map(&source_map.expansions)
+        + thin_hash_map(&source_map.expansions)
         + thin_vec(&source_map.diagnostics)
 }
 
 fn format_template_heap(template: &FormatTemplate) -> usize {
-    hash_map_with(&template.format_args_to_captures, |(_hygiene, captures)| vec(captures))
-        + hash_map_with(&template.asm_to_captures, |captures| {
+    thin_hash_map_with(&template.format_args_to_captures, |(_hygiene, captures)| vec(captures))
+        + thin_hash_map_with(&template.asm_to_captures, |captures| {
             vec(captures) + captures.iter().map(vec).sum::<usize>()
         })
-        + hash_map(&template.implicit_capture_to_source)
+        + thin_hash_map(&template.implicit_capture_to_source)
 }

@@ -186,7 +186,7 @@ impl ItemScope {
     /// def map is worth weighing at all.
     pub(crate) fn weigh(&self, row: &mut dyn FnMut(&'static str, crate::heap_size::Weight)) {
         use crate::heap_size::{
-            hash_map_weight, hash_set_weight, index_map_weight, small_vec_weight, thin_vec_weight,
+            small_vec_weight, thin_hash_map_weight, thin_hash_set_weight, thin_vec_weight,
         };
 
         let ItemScope {
@@ -212,31 +212,31 @@ impl ItemScope {
         } = self;
 
         // `Name` is an interned symbol, so every key here is a plain id.
-        row("scope.types", index_map_weight(types));
-        row("scope.values", index_map_weight(values));
-        row("scope.macros", index_map_weight(macros));
-        row("scope.unresolved", hash_set_weight(unresolved));
+        row("scope.types", thin_hash_map_weight(types));
+        row("scope.values", thin_hash_map_weight(values));
+        row("scope.macros", thin_hash_map_weight(macros));
+        row("scope.unresolved", thin_hash_set_weight(unresolved));
         row("scope.declarations", thin_vec_weight(declarations));
         row("scope.impls", thin_vec_weight(impls));
         row("scope.builtin_derive_impls", thin_vec_weight(builtin_derive_impls));
         row("scope.extern_blocks", thin_vec_weight(extern_blocks));
         row("scope.unnamed_consts", thin_vec_weight(unnamed_consts));
         row("scope.unnamed_trait_imports", thin_vec_weight(unnamed_trait_imports));
-        row("scope.use_imports_types", hash_map_weight(use_imports_types));
-        row("scope.use_imports_values", hash_map_weight(use_imports_values));
-        row("scope.use_imports_macros", hash_map_weight(use_imports_macros));
+        row("scope.use_imports_types", thin_hash_map_weight(use_imports_types));
+        row("scope.use_imports_values", thin_hash_map_weight(use_imports_values));
+        row("scope.use_imports_macros", thin_hash_map_weight(use_imports_macros));
         row("scope.use_decls", thin_vec_weight(use_decls));
         row("scope.extern_crate_decls", thin_vec_weight(extern_crate_decls));
-        row("scope.legacy_macros", hash_map_weight(legacy_macros));
+        row("scope.legacy_macros", thin_hash_map_weight(legacy_macros));
         for macros in legacy_macros.values() {
             row("scope.legacy_macros (spilled)", small_vec_weight(macros));
         }
-        row("scope.attr_macros", hash_map_weight(attr_macros));
-        row("scope.macro_invocations", hash_map_weight(macro_invocations));
+        row("scope.attr_macros", thin_hash_map_weight(attr_macros));
+        row("scope.macro_invocations", thin_hash_map_weight(macro_invocations));
         // Two levels of `SmallVec`: the invocations for one item, and the
         // derive calls within each. Both are inline until they spill, and
         // `small_vec` charges nothing while they have not.
-        row("scope.derive_macros", hash_map_weight(derive_macros));
+        row("scope.derive_macros", thin_hash_map_weight(derive_macros));
         for invocations in derive_macros.values() {
             row("scope.derive_macros (spilled)", small_vec_weight(invocations));
             for invocation in invocations {

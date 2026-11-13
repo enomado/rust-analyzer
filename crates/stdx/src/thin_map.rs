@@ -25,7 +25,7 @@ type ThinReprItem<K, V> = Align<(K, V)>;
 type ThinReprVec<K, V> = ThinVec<ThinReprItem<K, V>>;
 
 enum ReprRef<'a, K, V, M> {
-    Thin(&'a [ThinReprItem<K, V>]),
+    Thin(&'a ThinReprVec<K, V>),
     Map(&'a M),
 }
 
@@ -249,6 +249,13 @@ impl<K: Hash + Eq, V, S: BuildHasher + Default> Map<K, V> for std::collections::
 #[expect(clippy::disallowed_types)]
 pub type ThinHashMap<K, V, S> = ThinMap<K, V, std::collections::HashMap<K, V, S>>;
 
+/// What [`ThinMap::storage`] reports: the inline vector's allocated slots, or
+/// the boxed map itself (the box allocation is `size_of::<M>()`).
+pub enum ThinMapStorage<'a, M> {
+    Thin { allocated_entries: usize, entry_size: usize },
+    Map(&'a M),
+}
+
 /// The maximum len to still use `ThinVec`.
 const LEN_CUTOFF: usize = 10;
 
@@ -317,6 +324,21 @@ impl<K: Hash + Eq, V, M: Map<K, V>> ThinMap<K, V, M> {
     #[inline]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+
+    /// Where the entries live, for code that weighs this map's heap. The
+    /// representation is private, so a caller cannot tell an inline `ThinVec`
+    /// from a boxed map any other way.
+    pub fn storage(&self) -> ThinMapStorage<'_, M> {
+        match self.repr_ref() {
+            ReprRef::Thin(repr) => ThinMapStorage::Thin {
+                // `ThinVec::capacity` is 0 for the shared empty singleton, so
+                // the product is 0 exactly when nothing is allocated.
+                allocated_entries: repr.capacity(),
+                entry_size: mem::size_of::<ThinReprItem<K, V>>(),
+            },
+            ReprRef::Map(map) => ThinMapStorage::Map(map),
+        }
     }
 
     #[inline]
@@ -655,7 +677,7 @@ where
     #[inline]
     fn clone(&self) -> Self {
         let repr = match self.repr_ref() {
-            ReprRef::Thin(repr) => Repr::Thin(ThinVec::from(repr)),
+            ReprRef::Thin(repr) => Repr::Thin(ThinVec::from(&repr[..])),
             ReprRef::Map(repr) => Repr::Map(Box::new(Align(repr.clone()))),
         };
         Self::from_repr(repr)
